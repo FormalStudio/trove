@@ -1,0 +1,13 @@
+[package]
+name = "trove-search"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+trove-fs.workspace = true
+flume.workspace = true
+
+[lints]
+workspace = true

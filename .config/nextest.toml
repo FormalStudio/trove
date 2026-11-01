@@ -1,0 +1,46 @@
+[store]
+dir = "target/nextest"
+
+# Tier 3 tests post real HID events and take over focus, so they run one at a time. Their last
+# path segment starts with `real_` or they live in a `real` module (`tests/real.rs`), so a gate
+# test such as `gate_m0::real_resize_drag` is tier 3 too.
+[test-groups.real-window]
+max-threads = 1
+
+# Tier 1 (logic, TestBackend) and tier 2 (in-process backends) run in parallel; every test is its
+# own process. Default profile for local runs: everything except tier 3.
+[profile.default]
+default-filter = "not test(/(^|::)(real::|real_)/)"
+fail-fast = false
+slow-timeout = { period = "30s", terminate-after = 4 }
+
+[[profile.default.overrides]]
+filter = "test(/(^|::)(real::|real_)/)"
+test-group = "real-window"
+slow-timeout = { period = "60s", terminate-after = 4 }
+
+# Tiers 1 and 2 only, what `just test` and CI's first step run.
+[profile.fast]
+inherits = "default"
+fail-fast = true
+
+# CI: all tiers that the runner can host, retries off so flakes show up.
+[profile.ci]
+inherits = "default"
+retries = 0
+failure-output = "immediate-final"
+status-level = "fail"
+final-status-level = "slow"
+
+[profile.ci.junit]
+path = "junit.xml"
+
+# Tier 3 only, for machines with a window server: `cargo nextest run --profile real`.
+[profile.real]
+default-filter = "test(/(^|::)(real::|real_)/)"
+fail-fast = false
+slow-timeout = { period = "60s", terminate-after = 4 }
+
+[[profile.real.overrides]]
+filter = "all()"
+test-group = "real-window"

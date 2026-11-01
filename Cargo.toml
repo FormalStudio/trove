@@ -1,0 +1,69 @@
+[workspace]
+resolver = "3"
+members = [".", "crates/*"]
+
+[workspace.package]
+edition = "2024"
+license = "MIT"
+rust-version = "1.95"
+
+[workspace.dependencies]
+trove-fs = { path = "crates/trove-fs" }
+trove-ops = { path = "crates/trove-ops" }
+trove-preview = { path = "crates/trove-preview" }
+trove-search = { path = "crates/trove-search" }
+flume = "0.11"
+
+[workspace.lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+dbg_macro = "deny"
+todo = "deny"
+print_stdout = "deny"
+
+[profile.release]
+lto = "thin"
+codegen-units = 4
+
+[profile.dev.package."*"]
+opt-level = 2
+debug = "line-tables-only"
+
+[package]
+name = "trove"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+
+[dependencies]
+trove-fs.workspace = true
+flume.workspace = true
+nd = { git = "https://github.com/FormalStudio/NativeDesktop", branch = "main" }
+
+[dev-dependencies]
+nd = { git = "https://github.com/FormalStudio/NativeDesktop", branch = "main", features = ["test", "audit"] }
+
+[build-dependencies]
+nd = { git = "https://github.com/FormalStudio/NativeDesktop", branch = "main", default-features = false, features = ["build"] }
+
+# The appearance audit owns the main thread (AppKit), so libtest's harness is off.
+[[test]]
+name = "appearance"
+harness = false
+
+[lints]
+workspace = true
+
+# nd's GPUI patch queue.
+[patch.crates-io]
+gpui-pre = { git = "https://github.com/FormalStudio/NativeDesktop", branch = "main" }
+gpui-fast = { git = "https://github.com/FormalStudio/NativeDesktop", branch = "main" }
+gpui-pre-apple = { git = "https://github.com/FormalStudio/NativeDesktop", branch = "main" }
+gpui-fast-apple = { git = "https://github.com/FormalStudio/NativeDesktop", branch = "main" }
+gpui-pre-linux = { git = "https://github.com/FormalStudio/NativeDesktop", branch = "main" }
+gpui-fast-linux = { git = "https://github.com/FormalStudio/NativeDesktop", branch = "main" }
+gpui-pre-wgpu = { git = "https://github.com/FormalStudio/NativeDesktop", branch = "main" }
+gpui-fast-wgpu = { git = "https://github.com/FormalStudio/NativeDesktop", branch = "main" }
+gpui-pre-windows = { git = "https://github.com/FormalStudio/NativeDesktop", branch = "main" }
+gpui-fast-windows = { git = "https://github.com/FormalStudio/NativeDesktop", branch = "main" }
+
