@@ -25,7 +25,10 @@ pub enum EntryKind {
     Dir,
     File,
     /// A symlink; `to_dir` once its target has been stat'd and is a directory.
-    Symlink { to_dir: bool, broken: bool },
+    Symlink {
+        to_dir: bool,
+        broken: bool,
+    },
     Other,
 }
 
@@ -271,7 +274,9 @@ pub fn sort_entries(entries: &mut [Entry], order: SortOrder) {
         let by_key = match order.key {
             SortKey::Name => Ordering::Equal,
             SortKey::Size => size_of(a).cmp(&size_of(b)),
-            SortKey::Kind => a.file_kind.label().cmp(b.file_kind.label()).then_with(|| a.extension().cmp(b.extension())),
+            SortKey::Kind => {
+                a.file_kind.label().cmp(b.file_kind.label()).then_with(|| a.extension().cmp(b.extension()))
+            }
             SortKey::Modified => meta_time(a, |m| m.modified).cmp(&meta_time(b, |m| m.modified)),
             SortKey::Created => meta_time(a, |m| m.created).cmp(&meta_time(b, |m| m.created)),
         };

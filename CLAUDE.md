@@ -2,8 +2,8 @@
 
 Trove is a NativeDesktop app: one Rust view tree (`nd`) that renders to real AppKit controls on
 macOS, GPUI with the matugen palette on Linux, a Fluent skin on Windows and plain GPUI on the
-web. It starts as a click counter in `src/app.rs`; replace this paragraph with what the app does
-once it does something.
+web. It is a file manager: `src/root.rs` is the window (toolbar, sidebar, tab strip, status bar,
+preview pane) and `src/tab.rs` one tab, streaming its folder from `trove_fs::list()`.
 
 ## Commands
 

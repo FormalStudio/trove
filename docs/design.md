@@ -99,15 +99,23 @@ a network file system gets no watcher (inotify cannot see remote changes); the U
 focus and F5. Symlinks are listed with `EntryKind::Symlink`; their target is resolved in the
 stat phase.
 
+Implementation notes: `ListOptions` is `Default`. The watcher starts before readdir (so nothing
+is missed) but delivers `Changed` only after `Complete`; a delete or move of the watched
+directory ends the listing with `Error(NotFound)`. `Volume`s come from mountinfo only, so gvfs
+locations (which are directories, not mounts) are not enumerated; `is_network_path` still treats
+anything under `/run/user/<uid>/gvfs/` as remote. `unmount` also falls back to `umount` for
+nfs/cifs. The inotify watcher makes trove-fs Linux-only for now.
+
 ### trove-ops
 
 ```rust
 pub struct Ops;                                   // one per app, owns a worker thread
 impl Ops {
     pub fn new() -> (Ops, flume::Receiver<OpEvent>);
+    pub fn with_config(c: Config) -> (Ops, flume::Receiver<OpEvent>); // Config { trash: TrashConfig }, for tests
     pub fn submit(&self, op: Op) -> JobId;
     pub fn cancel(&self, job: JobId);
-    pub fn resolve(&self, job: JobId, r: Resolution); // answer to OpEvent::Conflict
+    pub fn resolve(&self, job: JobId, r: ResolutionChoice); // answer to OpEvent::Conflict
     pub fn undo(&self) -> Option<JobId>;              // inverse of the newest undoable job
     pub fn redo(&self) -> Option<JobId>;
 }
@@ -122,7 +130,8 @@ pub enum Op {
     Restore { trashed: Vec<PathBuf> },            // paths inside Trash/files
     EmptyTrash,
     Duplicate { paths: Vec<PathBuf> },            // "name copy.ext", "name copy 2.ext"
-    Compress { paths: Vec<PathBuf>, dest: PathBuf }, Extract { archive: PathBuf, dest_dir: PathBuf },
+    Compress { paths: Vec<PathBuf>, dest: PathBuf }, // dest: the .zip to write, or a folder to write into
+    Extract { archive: PathBuf, dest_dir: PathBuf },
 }
 pub enum OpEvent {
     Started { job: JobId, title: String },
@@ -132,13 +141,14 @@ pub enum OpEvent {
     Failed { job: JobId, error: String },
     Cancelled { job: JobId },
 }
-pub enum Resolution { Replace, Skip, KeepBoth, Cancel, /* apply_to_all */ }
+pub enum Resolution { Replace, Skip, KeepBoth, Cancel }
 pub struct ResolutionChoice { pub resolution: Resolution, pub apply_to_all: bool }
 
 // clipboard.rs: x-special/gnome-copied-files and text/uri-list through wl-copy/wl-paste when
 // present (interop with GNOME Files, Dolphin, terminals), an in-process copy always.
 pub fn copy_files(paths: &[PathBuf], cut: bool);
 pub fn paste_files() -> Option<(Vec<PathBuf>, bool /* cut */)>;
+pub fn clear();                                  // forget the in-process copy, e.g. after pasting a cut
 
 // open_with.rs: desktop entries from XDG_DATA_DIRS, defaults from mimeapps.list.
 pub fn mime_of(path: &Path) -> String;           // by name; content sniff only when the name says nothing
@@ -146,15 +156,55 @@ pub fn apps_for(mime: &str) -> Vec<AppInfo>;     // default first
 pub fn open(paths: &[PathBuf]) -> Result<(), String>;               // default app per file
 pub fn open_with(app: &AppInfo, paths: &[PathBuf]) -> Result<(), String>; // Exec field codes
 pub fn set_default(app: &AppInfo, mime: &str) -> io::Result<()>;
-pub struct AppInfo { pub id: String, pub name: String, pub icon: Option<String>, pub exec: String }
+pub struct AppInfo {
+    pub id: String, pub name: String, pub icon: Option<String>, pub exec: String,
+    pub terminal: bool, pub desktop_file: Option<PathBuf>, // Terminal=true; %k
+}
 ```
 
-Rules: a move within one file system is `rename(2)`; across file systems it is copy then
-delete, with the delete only after every byte landed. Copies use `std::fs::copy`
-(`copy_file_range`, so reflinks where the file system has them) and keep mtime and mode. A
-conflict pauses the job until resolved. Trash follows the freedesktop spec (per-volume
-`.Trash-$uid` for other mounts) and Restore reads `.trashinfo`. Undo covers rename, move, copy,
-trash, new folder, new file and duplicate. Permanent delete and empty trash are not undoable.
+Rules: jobs run one at a time, in submission order; a conflict blocks the job (and so the
+queue) until `resolve` or `cancel`. A move within one file system is `rename(2)`; across file
+systems it is copy then delete per top-level source, with the delete only after every byte
+landed. Files are copied in 1 MiB steps with `copy_file_range` (a `FICLONE` reflink first, a
+read/write loop if the kernel refuses), checking for cancel between steps; a cancelled copy
+removes the partial file it was writing and nothing else. mtime, atime and permission bits are
+kept and symlinks are copied as symlinks. Progress is throttled to about 20 events a second,
+and a quick pre-walk (which reports too) fills in the totals. Copying or duplicating into the
+folder the source lives in makes "name copy.ext", "name copy 2.ext" with no prompt. Any other
+name clash is a conflict: KeepBoth picks "name 2.ext". Replace on a file overwrites it (through
+a temporary name, so a failed copy keeps the old one). Replace on a folder merges: the source's
+contents are copied or moved into the existing folder, files with the same name are replaced,
+files only the target has are kept, and the choice applies to everything inside. Replacing a
+folder with a file is refused. Moving or copying a folder into itself or a subfolder fails
+with "Cannot move/copy "x" into itself". A rename keeping the same name is a no-op, a
+case-only rename works, and an existing different file fails it. Trash follows the freedesktop
+spec: the home trash for anything on its file system, else `$topdir/.Trash/$uid` (only when
+`.Trash` is a sticky, non-symlink folder) or `$topdir/.Trash-$uid`, with `.trashinfo` files;
+a volume with neither usable fails the item with "Cannot move to Trash on this volume" so the
+UI can offer permanent delete. Restore reads `.trashinfo` and uses KeepBoth naming when the
+original path is taken. EmptyTrash empties the home trash and every mounted volume's.
+Extract writes into a hidden staging folder first: a lone top-level entry lands in `dest_dir`
+under its own name, anything else in a new folder named after the archive. `.zip` is read
+natively; other formats use `bsdtar`, else `tar` for tar archives, else the job fails naming
+the missing tool.
+
+Undo: each job records its inverse (rename and move back, trash what a copy, duplicate, new
+item, compress or extract created, restore what a trash moved, trash what a restore brought
+back). `undo` runs the newest inverse as a job and files that run's own inverse for `redo`; a
+new job clears redo. A job that replaced or merged over existing files is not undoable.
+Permanent delete and empty trash are not undoable and leave the journal alone.
+
+Open with: apps come from `$XDG_DATA_HOME` and each `$XDG_DATA_DIRS` `applications` folder
+(the flatpak export folders are always included), the first folder winning per desktop file
+id. Defaults and associations follow `mimeapps.list` (user config, `$XDG_CONFIG_DIRS`, then
+the data folders), `MimeType=` and `mimeinfo.cache`; `text/*` falls back to `text/plain`. NoDisplay,
+Hidden and a missing TryExec hide an app from `apps_for` only; a NoDisplay default still
+opens. `open` groups files by app and falls back to `xdg-open`, then `gio open`. Parsed
+entries are cached and reloaded when an applications folder or a `mimeapps.list` changes.
+Launched apps get their own session with no stdio, so closing Trove never ends them.
+The clipboard mirrors a copy to the system as `x-special/gnome-copied-files` only (`wl-copy`
+serves one type per process); `paste_files` also reads `text/uri-list` and a plain-text
+absolute path, and an in-process copy yields to anything newer on the system clipboard.
 
 ### trove-preview
 
@@ -164,17 +214,23 @@ pub enum Preview {
     Image { path: PathBuf, width: u32, height: u32 },        // the UI draws it with nd's image()
     Text { text: String, truncated: bool, language: Option<&'static str>, lines: usize },
     Folder { items: u32, hidden: u32, size: Option<u64> /* only when cheap */ },
-    Archive { entries: Vec<String>, total: usize },
+    Archive { entries: Vec<String>, total: usize },    // first 200 names; total is a lower bound if counting hit 300 ms
     Audio { title: Option<String>, artist: Option<String>, album: Option<String>, duration: Option<f64>, cover: Option<PathBuf> },
     Thumbnail { path: PathBuf },                             // video, PDF, fonts... via thumbnailers
     None,
 }
-pub fn info(path: PathBuf) -> flume::Receiver<Info>;  // size, dates, mode string, owner, mime, link target
+pub fn info(path: PathBuf) -> flume::Receiver<Info>;  // worker thread; disconnects if the path cannot be stat'd
+pub struct Info { pub path: PathBuf, pub is_dir: bool, pub size: u64, pub modified: Option<SystemTime>,
+                  pub created: Option<SystemTime>, pub accessed: Option<SystemTime>, pub mode: String /* drwxr-xr-x */,
+                  pub owner: String, pub group: String, pub mime: String, pub link_target: Option<PathBuf>,
+                  pub dimensions: Option<(u32, u32)> }
+// Tests and embedders: Config::rooted(dir) / Config::from_env(), Engine::new(config) with blocking
+// preview/thumbnail methods, preview_with(engine, ..), Thumbnails::with_engine(engine, threads).
 pub struct Thumbnails;                                  // bounded worker pool, newest request first
 impl Thumbnails {
     pub fn new(threads: usize) -> (Thumbnails, flume::Receiver<(PathBuf, Option<PathBuf>)>);
-    pub fn request(&self, path: PathBuf, mtime: SystemTime, size: ThumbSize);
-    pub fn cancel_all(&self);
+    pub fn request(&self, path: PathBuf, mtime: SystemTime, size: ThumbSize); // LIFO; deduped per (path, size); a repeat moves to the front
+    pub fn cancel_all(&self);                                                 // drops queued jobs, running ones still answer
 }
 pub enum ThumbSize { Normal /* 128 */, Large /* 256 */ }
 ```
@@ -193,22 +249,46 @@ impl Search {
     pub fn new(cache_dir: PathBuf, home: PathBuf) -> Search;   // loads nothing yet
     pub fn start_indexing(&self);                               // idle-priority thread; loads or rebuilds
     pub fn index_state(&self) -> IndexState;                    // Absent, Loading, Building { scanned }, Ready { entries, age }
-    pub fn query(&self, q: Query) -> SearchRun;                 // drop = cancel
+    pub fn query(&self, q: Query) -> SearchRun;                 // drop = cancel; returns at once
+    pub fn indexed_root(&self) -> &Path;
+    pub fn note_created(&self, path: PathBuf);                  // after the UI's own operations, so results
+    pub fn note_removed(&self, path: PathBuf);                  // are right before the next rebuild; a folder
+    pub fn note_renamed(&self, from: PathBuf, to: PathBuf);     // carries its contents
 }
 pub struct Query { pub text: String, pub scope: PathBuf, pub show_hidden: bool, pub limit: usize }
-pub struct SearchRun { pub events: flume::Receiver<SearchEvent> }
-pub enum SearchEvent { Hits(Vec<Hit>) /* best so far, replaces the previous set */, Done { scanned: u64, elapsed_ms: u64 } }
-pub struct Hit { pub path: PathBuf, pub is_dir: bool, pub score: i32, pub name_matches: Vec<(u32, u32)> }
+pub struct SearchRun { pub events: flume::Receiver<SearchEvent>, /* private cancel guard */ }
+pub enum SearchEvent {
+    Hits(Vec<Hit>),  // best so far, best first; replaces the previous set
+    Done { scanned: u64, elapsed_ms: u64, truncated: bool },  // truncated: a network scope hit its walk cap
+}
+pub struct Hit { pub path: PathBuf, pub is_dir: bool, pub score: i32,
+                 pub name_matches: Vec<(u32, u32)> }  // byte ranges [start, end) of the file name
 ```
 
-Query language: words match the name, all must match, smart case; `"quoted"` is exact;
-`*` and `?` make a glob; `ext:pdf`, `kind:image|video|audio|doc|code|folder|archive`,
-`size:>10mb`, `modified:today|yesterday|week|month|year|<2026-01-01`, `in:<folder name>`.
-Ranking: exact name > name prefix > word boundary > substring > subsequence; then shallower
-depth, then newer mtime. Excluded by default: `.cache`, `node_modules`, `.git`, `target`,
-`.local/share/Trash`, `.cargo/registry`, `.rustup`, `.npm`, `.bun`, `__pycache__`; hidden
-entries only when the query starts with `.` or hidden files are shown. Network mounts are never
-indexed; a search scoped inside one walks it live.
+Query language: words match the name, all must match, smart case (per word: an uppercase
+letter makes that word case-sensitive); a word not in the name may match a folder on the path
+below the scope, as long as one word matches the name (`.config hypr`); `"quoted"` is a literal
+phrase, spaces kept, never fuzzy; `*` and `?` make a glob over the whole name; `ext:pdf` (or
+`ext:jpg,png`), `kind:image|video|audio|doc|code|folder|archive` (also `text`, `pdf`, `font`,
+`app`; a prefix like `kind:im` works), `size:>10mb` (`>`, `>=`, `<`, `<=`, `=`, bare means at
+least; `k`/`m`/`g`/`t` decimal, `kib`/`mib`/`gib` binary),
+`modified:today|yesterday|week|month|year|<2026-01-01|>2026-01-01|2026-01-01`,
+`in:<folder name>` (a folder of that name, any case, on the path from the scope down). A filter whose value does not parse yet is ignored.
+Ranking: exact name > name prefix (the name minus its extension first) > word boundary (after
+`_ - . space`, camelCase humps) > substring > subsequence; then shallower depth, then newer
+mtime; a folder whose whole name is the query gets a small boost. Subsequence matches are only
+looked for when there are fewer substring hits than `limit`. Excluded by default: `.cache`,
+`node_modules`, `.git`, `target`, `.local/share/Trash`, `.cargo/registry`, `.rustup`, `.npm`,
+`.bun`, `__pycache__`; hidden entries only when the query starts with `.` or hidden files are
+shown. Network, FUSE and pseudo mounts are never indexed, nor is any mount from another device
+(a USB stick under the home directory); symlinks are never followed.
+
+The index lives in `cache_dir/index-v1.bin` (rebuilt when missing, corrupt or another version).
+`start_indexing` loads it (Loading, then Ready) and rebuilds in the background when it is over
+30 minutes old, the old one serving queries meanwhile. A scope outside the index (outside the
+root, excluded, on another mount, or before the index is Ready) is walked live, `Hits` improving
+every 50 ms; a network scope's walk stops at depth 4 or 20k entries with `truncated`. Once the
+index is over 5 minutes old a query also walks its scope 3 levels deep to catch new files.
 
 ## Interface
 

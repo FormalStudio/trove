@@ -38,10 +38,15 @@ rust-version = "1.95"
 [dependencies]
 trove-fs.workspace = true
 flume.workspace = true
+jiff = "0.2"
 nd = { git = "https://github.com/FormalStudio/NativeDesktop", branch = "main" }
 
 [dev-dependencies]
 nd = { git = "https://github.com/FormalStudio/NativeDesktop", branch = "main", features = ["test", "audit"] }
+nd-test = { git = "https://github.com/FormalStudio/NativeDesktop", branch = "main" }
+
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+ndshell = { git = "https://github.com/FormalStudio/NativeDesktop", branch = "main" }
 
 [build-dependencies]
 nd = { git = "https://github.com/FormalStudio/NativeDesktop", branch = "main", default-features = false, features = ["build"] }

@@ -8,6 +8,22 @@ rust-version.workspace = true
 [dependencies]
 trove-fs.workspace = true
 flume.workspace = true
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp", "tiff"] }
+imagesize = "0.14"
+png = "0.18"
+jpeg-decoder = { version = "0.3", default-features = false }
+crc32fast = "1"
+md5 = "0.8"
+zip = { version = "9", default-features = false }
+tar = "0.4"
+flate2 = "1"
+lofty = "0.25"
+mime_guess = "2"
+infer = "0.22"
+libc = "0.2"
+
+[dev-dependencies]
+tempfile = "3"
 
 [lints]
 workspace = true

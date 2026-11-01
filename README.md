@@ -8,24 +8,24 @@
 [![Rust](https://img.shields.io/badge/rust-2024-4a9eda?style=for-the-badge&labelColor=161616&logo=rust&logoColor=white)](src/)
 [![Status](https://img.shields.io/badge/status-first_scaffold-d35f5f?style=for-the-badge&labelColor=161616)](#features)
 
-A counter with one button. <!-- nd: replace with one plain sentence: what it is and who it is for, e.g. "iMessage on Linux." -->
+A file manager for Linux that opens instantly, even with a dead network mount in the sidebar.
 
 <!-- nd: hero screenshot from `nd docs capture`: ![Trove](docs/images/main.png) -->
 
 ```
-┌──────────────────────┐   ops: create, update   ┌──────────────────────────┐
-│ src/app.rs (Rust)    │ ──────────────────────▶ │ backend                  │
-│ Counter view         │ ◀────────────────────── │ AppKit on macOS, GPUI on │
-└──────────────────────┘   events: clicks, keys  │ Linux, Windows and web   │
-                                                 └──────────────────────────┘
+┌──────────────────────┐   chunks of names,   ┌──────────────────────────┐
+│ trove-fs             │   then sizes, dates  │ src/tab.rs               │
+│ listing threads      │ ───────────────────▶ │ one tab: history, sort,  │
+│ per folder           │ ◀─────────────────── │ filter, selection, view  │
+└──────────────────────┘   drop = cancel      └──────────────────────────┘
 ```
 
-The window is one Rust view tree. On macOS the toolbar is a real `NSToolbar` and the button a
-real `NSButton`; on Linux the same tree draws through GPUI in your matugen colours, and on Windows
-in Fluent. Clicking sends one event back, the count goes up, and only the text that changed is
-touched.
+Each tab streams its folder from worker threads: names land first, sizes and dates fill in row
+by row as they are read, and leaving a folder drops its listing instead of waiting for it. The
+first frame waits on nothing but a few small config files.
 
-<!-- nd: one measured number in a plain sentence, e.g. "It opens in 140 ms and idles at 0% CPU." Measure a release build on the slowest machine you have. -->
+A release build reaches its first frame about 150 ms after the process starts (g815, headless
+Hyprland, median of ten launches).
 
 <!-- nd: two-column screenshot table from `nd docs capture`:
 | | |
@@ -35,12 +35,19 @@ touched.
 
 ## Features
 
-- Counts clicks. Starts at 42 with `TROVE_DEMO=1`, which is what the tests and screenshots use.
+- List and grid views, Finder-style dates, natural order with folders first, sort by any column.
+- Tabs with their own history, folder, selection and view: Ctrl+T, Ctrl+W, Ctrl+Tab, Alt+1..9.
+- A breadcrumb path bar that turns into a text field on Ctrl+L, with Tab completion.
+- Search that filters the current folder as you type, type-select, Ctrl+H for hidden files.
+- A sidebar of places, bookmarks, devices with free space, and network mounts with eject.
+- `TROVE_DEMO=1` opens a fixed fixture folder, which is what the tests and screenshots use.
 - Follows the system: light and dark, the accent colour, and matugen palettes on Linux, live.
 - Writes an incident bundle when it crashes or hangs, so a bug report comes with the last inputs
   and what was on screen.
 
-Not working yet: nothing, because it does nothing yet. Keep this line honest as it grows.
+Not working yet: copy, move, rename and trash; previews of file contents; search beyond the
+current folder; Shift-click ranges, rubber-band selection and the mouse's back and forward
+buttons.
 
 <!-- nd: replace these with what the app does. Numbers beat adjectives: "100k rows", "under 150 ms". A yes/no table works when features differ by platform. Say what does not work yet. -->
 

@@ -3,5 +3,5 @@
 //! `nd check` and `nd test`.
 
 fn main() {
-    nd::audit::Audit::new("trove", trove::app).window("main", |cx| trove::open(cx).id()).run()
+    nd::audit::Audit::new("trove", trove::app).window("main", |cx| trove::open_demo(cx).id()).run()
 }
