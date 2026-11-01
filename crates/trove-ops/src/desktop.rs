@@ -412,21 +412,36 @@ fn file_uri(p: &Path) -> String {
     format!("file://{}", utf8_percent_encode(&String::from_utf8_lossy(p.as_os_str().as_bytes()), PATH_SET))
 }
 
-fn expand_inline(arg: &str, app: &AppInfo, file: Option<&Path>) -> String {
+// A field code inside an `sh -c` script would hand the file name to the shell as code, so there
+// the value goes in single-quoted, the way GLib quotes every expansion before it splits argv.
+pub(crate) fn is_shell_script(tokens: &[String], at: usize) -> bool {
+    let shell = tokens
+        .first()
+        .and_then(|t| t.rsplit('/').next())
+        .is_some_and(|p| matches!(p, "sh" | "bash" | "dash" | "zsh" | "ksh" | "fish"));
+    shell && at > 0 && tokens[at - 1] == "-c"
+}
+
+pub(crate) fn sh_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\''"))
+}
+
+fn expand_inline(arg: &str, app: &AppInfo, file: Option<&Path>, quote: bool) -> String {
     let mut out = String::with_capacity(arg.len());
     let mut chars = arg.chars();
+    let put = |out: &mut String, v: String| out.push_str(&if quote { sh_quote(&v) } else { v });
     while let Some(c) = chars.next() {
         if c != '%' {
             out.push(c);
             continue;
         }
         match chars.next() {
-            Some('f' | 'F') => out.push_str(&file.map(|f| f.to_string_lossy().into_owned()).unwrap_or_default()),
-            Some('u' | 'U') => out.push_str(&file.map(file_uri).unwrap_or_default()),
-            Some('i') => out.push_str(app.icon.as_deref().unwrap_or("")),
-            Some('c') => out.push_str(&app.name),
+            Some('f' | 'F') => put(&mut out, file.map(|f| f.to_string_lossy().into_owned()).unwrap_or_default()),
+            Some('u' | 'U') => put(&mut out, file.map(file_uri).unwrap_or_default()),
+            Some('i') => put(&mut out, app.icon.clone().unwrap_or_default()),
+            Some('c') => put(&mut out, app.name.clone()),
             Some('k') => {
-                out.push_str(&app.desktop_file.as_ref().map(|p| p.to_string_lossy().into_owned()).unwrap_or_default())
+                put(&mut out, app.desktop_file.as_ref().map(|p| p.to_string_lossy().into_owned()).unwrap_or_default())
             }
             Some('%') => out.push('%'),
             // %d %D %n %N %v %m are deprecated and expand to nothing.
@@ -447,7 +462,7 @@ pub(crate) fn expand_exec(app: &AppInfo, files: &[PathBuf]) -> Result<Vec<Vec<St
     let single = tokens.iter().any(|t| t.contains("%f") || t.contains("%u"));
     let build = |batch: &[PathBuf]| -> Vec<String> {
         let mut argv = Vec::new();
-        for t in &tokens {
+        for (at, t) in tokens.iter().enumerate() {
             match t.as_str() {
                 "%F" => argv.extend(batch.iter().map(|f| f.to_string_lossy().into_owned())),
                 "%U" => argv.extend(batch.iter().map(|f| file_uri(f))),
@@ -458,7 +473,7 @@ pub(crate) fn expand_exec(app: &AppInfo, files: &[PathBuf]) -> Result<Vec<Vec<St
                     }
                 }
                 _ => {
-                    let s = expand_inline(t, app, batch.first().map(PathBuf::as_path));
+                    let s = expand_inline(t, app, batch.first().map(PathBuf::as_path), is_shell_script(&tokens, at));
                     if !s.is_empty() || t.is_empty() {
                         argv.push(s);
                     }
@@ -535,4 +550,24 @@ pub(crate) fn set_default_text(text: &str, mime: &str, id: &str) -> String {
     let mut out = lines.join("\n");
     out.push('\n');
     out
+}
+
+#[cfg(test)]
+mod shell_tests {
+    use super::*;
+
+    #[test]
+    fn file_codes_in_shell_scripts_are_quoted() {
+        let app = AppInfo {
+            id: "x.desktop".into(),
+            name: "X".into(),
+            icon: None,
+            exec: "sh -c \"cat %f\" --name=%f".into(),
+            terminal: false,
+            desktop_file: None,
+        };
+        let cmds = expand_exec(&app, &[PathBuf::from("/tmp/a'$(touch pwned).txt")]).unwrap();
+        assert_eq!(cmds[0][2], "cat '/tmp/a'\\''$(touch pwned).txt'");
+        assert_eq!(cmds[0][3], "--name=/tmp/a'$(touch pwned).txt");
+    }
 }

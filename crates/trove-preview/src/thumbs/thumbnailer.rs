@@ -46,9 +46,19 @@ impl Thumbnailer {
     /// `Exec` split into arguments with the field codes filled in: `%i` input path, `%u` input
     /// URI, `%o` output path, `%s` size in pixels, `%%` a percent sign.
     pub fn command_line(&self, input: &Path, uri: &str, output: &Path, size: u32) -> Vec<String> {
-        split_exec(&self.exec)
-            .into_iter()
-            .map(|arg| {
+        let tokens = split_exec(&self.exec);
+        tokens
+            .iter()
+            .enumerate()
+            .map(|(at, arg)| {
+                let quote = is_shell_script(&tokens, at);
+                let put = |out: &mut String, v: &str| {
+                    if quote {
+                        out.push_str(&format!("'{}'", v.replace('\'', "'\\''")));
+                    } else {
+                        out.push_str(v);
+                    }
+                };
                 let mut out = String::new();
                 let mut chars = arg.chars();
                 while let Some(c) = chars.next() {
@@ -57,9 +67,9 @@ impl Thumbnailer {
                         continue;
                     }
                     match chars.next() {
-                        Some('i') => out.push_str(&input.to_string_lossy()),
-                        Some('u') => out.push_str(uri),
-                        Some('o') => out.push_str(&output.to_string_lossy()),
+                        Some('i') => put(&mut out, &input.to_string_lossy()),
+                        Some('u') => put(&mut out, uri),
+                        Some('o') => put(&mut out, &output.to_string_lossy()),
                         Some('s') => out.push_str(&size.to_string()),
                         Some('%') => out.push('%'),
                         _ => {}
@@ -69,6 +79,16 @@ impl Thumbnailer {
             })
             .collect()
     }
+}
+
+// A field code inside an `sh -c` script would hand the file name to the shell as code, so there
+// the value goes in single-quoted, the way GLib quotes every expansion before it splits argv.
+fn is_shell_script(tokens: &[String], at: usize) -> bool {
+    let shell = tokens
+        .first()
+        .and_then(|t| t.rsplit('/').next())
+        .is_some_and(|p| matches!(p, "sh" | "bash" | "dash" | "zsh" | "ksh" | "fish"));
+    shell && at > 0 && tokens[at - 1] == "-c"
 }
 
 /// Desktop Entry quoting: whitespace separates, double quotes group, backslash escapes inside them.
@@ -203,7 +223,7 @@ mod tests {
         let argv = t.command_line(Path::new("/in dir/a.mp4"), "file:///in%20dir/a.mp4", Path::new("/out/o.png"), 256);
         assert_eq!(
             argv,
-            ["sh", "-c", "echo /in dir/a.mp4 > /out/o.png", "--size=256", "file:///in%20dir/a.mp4", "100%"]
+            ["sh", "-c", "echo '/in dir/a.mp4' > '/out/o.png'", "--size=256", "file:///in%20dir/a.mp4", "100%"]
         );
     }
 

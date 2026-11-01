@@ -61,8 +61,8 @@ fn list_zip(path: &Path) -> Option<Listing> {
 }
 
 fn list_tar<R: std::io::Read>(reader: R) -> Option<Listing> {
-    let mut archive = tar::Archive::new(reader);
     let started = Instant::now();
+    let mut archive = tar::Archive::new(Budgeted { inner: reader, started, read: 0 });
     let mut entries = Vec::new();
     let mut total = 0;
     for entry in archive.entries().ok()? {
@@ -75,6 +75,29 @@ fn list_tar<R: std::io::Read>(reader: R) -> Option<Listing> {
         }
     }
     (total > 0).then_some(Listing { entries, total })
+}
+
+// Stepping to the next tar header decompresses the whole previous entry, so one huge (or
+// bomb-sized) member would hold the worker for as long as it takes. Reads fail past the budget,
+// which ends the listing with what was found so far.
+const READ_BUDGET: u64 = 512 << 20;
+const TIME_BUDGET: Duration = Duration::from_secs(2);
+
+struct Budgeted<R> {
+    inner: R,
+    started: Instant,
+    read: u64,
+}
+
+impl<R: std::io::Read> std::io::Read for Budgeted<R> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        if self.read > READ_BUDGET || self.started.elapsed() > TIME_BUDGET {
+            return Err(std::io::Error::other("archive listing budget spent"));
+        }
+        let n = self.inner.read(buf)?;
+        self.read += n as u64;
+        Ok(n)
+    }
 }
 
 fn list_external(path: &Path, tar_family: bool) -> Option<Listing> {
