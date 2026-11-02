@@ -40,8 +40,10 @@ const ORIGIN_W: f32 = 220.;
 /// How long a job's results wait for the listing to show them before selection gives up.
 const PENDING_FOR: f64 = 4.;
 pub const RENAME_FIELD: &str = "rename";
-/// The listing, whatever it shows: where keys go when no list holds focus.
+/// The listing's box, whatever it shows: it takes the keys itself only when no list shows.
 pub const VIEW_ID: &str = "files";
+pub const TABLE_ID: &str = "files-table";
+pub const GRID_ID: &str = "files-grid";
 
 /// A name being edited in place.
 #[derive(Clone, Debug, PartialEq)]
@@ -134,6 +136,8 @@ pub struct Tab {
     trash_asked: HashSet<EntryId>,
     /// An element to focus on the next frame, for state changes that arrive without a window.
     focus_next: Option<&'static str>,
+    /// The element [`Tab::focus_target`] named on the last frame, none before the first.
+    focus_shown: &'static str,
     /// The generation whose first names `TROVE_TRACE` reported.
     names_traced: u64,
     /// The rows the view's list was last given.
@@ -206,6 +210,7 @@ impl Tab {
             trash_info: HashMap::new(),
             trash_asked: HashSet::new(),
             focus_next: None,
+            focus_shown: "",
             names_traced: 0,
             synced: (view, Vec::new()),
             _clip: watch_clip,
@@ -770,24 +775,6 @@ impl Tab {
         }
     }
 
-    /// Arrows, Home, End and Select All, bound on the listing: see [`take_keys`].
-    pub fn move_selection(&mut self, to: Move, cx: &mut Context<Self>) {
-        if self.extras.results.shown() {
-            self.extras.results.move_selection(to, cx);
-            return cx.notify();
-        }
-        let selected = self.selected();
-        let Some((keys, cursor)) = moved(&self.visible, &selected, self.cursor, to) else { return };
-        self.pending = None;
-        self.cursor = cursor;
-        let state = self.list_state_mut();
-        state.set_selected(keys, cx);
-        if let Some(at) = cursor {
-            state.scroll_to(at, Align::Nearest, px(0.), cx);
-        }
-        cx.notify();
-    }
-
     /// Escape: clears the search first, then the selection.
     pub fn deselect(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.clear_search(window, cx) {
@@ -966,7 +953,7 @@ impl Tab {
             return d;
         }
         d.on_middle_click(move |_: &MiddleClickEvent, window, cx| {
-            cx.dispatch_action(window.id(), &OpenPlaceInNewTab(path.clone()));
+            cx.dispatch_action(window.id(), &OpenPlaceInNewTab(Location::Dir(path.clone())));
         })
     }
 
@@ -1149,58 +1136,6 @@ impl Tab {
     }
 }
 
-// nd: a list is no focusable node, so window.focus cannot reach it and a press on it leaves nd
-// focus on nothing, where no binding of the listing matches. The listing takes focus back on
-// the press's selection change, and its own bindings move the selection.
-pub(crate) fn take_keys(window: &mut Window) {
-    window.focus(VIEW_ID);
-}
-
-/// What an arrow, Home, End or Select All asks of a listing.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Move {
-    By(isize),
-    /// Shift and an arrow: grows the range towards the next row, or shrinks it back.
-    Extend(isize),
-    Home,
-    End,
-    All,
-}
-
-/// The selection and cursor `to` leaves in `rows`, None when nothing changes.
-pub fn moved(
-    rows: &[EntryId],
-    selected: &[EntryId],
-    cursor: Option<EntryId>,
-    to: Move,
-) -> Option<(Vec<EntryId>, Option<EntryId>)> {
-    let last = rows.len().checked_sub(1)?;
-    let at = cursor.and_then(|c| rows.iter().position(|id| *id == c));
-    let step = |by: isize| match at {
-        Some(i) => rows[(i as isize + by).clamp(0, last as isize) as usize],
-        None if by < 0 => rows[last],
-        None => rows[0],
-    };
-    let only = |id: EntryId| Some((vec![id], Some(id)));
-    match to {
-        Move::By(by) => only(step(by)),
-        Move::Home => only(rows[0]),
-        Move::End => only(rows[last]),
-        Move::All => Some((rows.to_vec(), cursor)),
-        Move::Extend(by) => {
-            let next = step(by);
-            let mut keys = selected.to_vec();
-            match cursor {
-                Some(c) if c != next && keys.contains(&next) => keys.retain(|k| *k != c),
-                _ if !keys.contains(&next) => keys.push(next),
-                _ => {}
-            }
-            keys.sort_by_key(|k| rows.iter().position(|r| r == k));
-            Some((keys, Some(next)))
-        }
-    }
-}
-
 /// The key `by` rows from `cursor` in `rows`, wrapping round; the first or last with none.
 pub(crate) fn step_in(rows: &[EntryId], cursor: Option<EntryId>, by: isize) -> Option<EntryId> {
     let n = rows.len() as isize;
@@ -1318,8 +1253,15 @@ fn recent_entries() -> flume::Receiver<Vec<(PathBuf, Entry)>> {
 
 impl Render for Tab {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let target = self.focus_target();
+        let was = std::mem::replace(&mut self.focus_shown, target);
         if let Some(id) = self.focus_next.take() {
             window.focus(id);
+        } else if was != target && was != crate::results::TABLE && target != crate::results::TABLE {
+            // Another view, or a folder that failed, emptied or answered, put another list in
+            // place of the one with the keys. The results come and go as the search field is
+            // typed in, which keeps them; the window moves them there and back itself.
+            window.focus(target);
         }
         if self.names_traced != self.generation && !self.visible.is_empty() {
             self.names_traced = self.generation;
@@ -1349,7 +1291,7 @@ impl Render for Tab {
                     let sort = me.clone();
                     let cell = cx.processor(Self::table_cell);
                     let list =
-                        table("files-table", &self.table, self.columns(), move |id, col, w, cx| cell((id, col), w, cx))
+                        table(TABLE_ID, &self.table, self.columns(), move |id, col, w, cx| cell((id, col), w, cx))
                             .estimated_row_height(px(ROW_HEIGHT))
                             .on_sort(move |e: &SortChanged, _, cx| {
                                 let _ = sort.update(cx, |t, cx| t.on_sort(e, cx));
@@ -1358,12 +1300,12 @@ impl Render for Tab {
                     self.file_list(list, &self.table, cx).into_any_element()
                 }
                 View::Grid => {
-                    let list = grid("files-grid", &self.grid, (px(TILE.0), px(TILE.1)), cx.processor(Self::tile))
+                    let list = grid(GRID_ID, &self.grid, (px(TILE.0), px(TILE.1)), cx.processor(Self::tile))
                         .gap(theme.spacing.xs)
                         .empty(self.empty_state());
                     self.file_list(list, &self.grid, cx).into_any_element()
                 }
-                View::Columns => crate::columns::render(self, width, cx),
+                View::Columns => crate::columns::render(self, cx),
             },
         };
         let (resize, menu) = (me.clone(), me);
@@ -1406,8 +1348,7 @@ impl Tab {
         let (sel, act, drop) = (me.clone(), me.clone(), me);
         let list = list
             .selection(Selection::multiple())
-            .on_selection_change(move |e: &SelectionChanged<EntryId>, window, cx| {
-                take_keys(window);
+            .on_selection_change(move |e: &SelectionChanged<EntryId>, _, cx| {
                 let _ = sel.update(cx, |t, cx| t.on_selection_change(e, cx));
             })
             .on_activate(move |e: &ActivateEvent<EntryId>, window, cx| {
@@ -1445,6 +1386,10 @@ impl Tab {
 impl Tab {
     pub fn set_window(&mut self, window: WindowId) {
         self.window = Some(window);
+    }
+
+    pub fn window_id(&self) -> Option<WindowId> {
+        self.window
     }
 
     fn origin(&self, cx: &mut Context<Self>) -> Option<Origin> {
@@ -1628,7 +1573,7 @@ impl Tab {
         if let Some(r) = self.renaming.take() {
             self.bump(r.id);
             self.sync_view(cx);
-            self.focus_next = Some(VIEW_ID);
+            self.focus_next = Some(self.focus_target());
             cx.notify();
         }
     }
@@ -1765,6 +1710,22 @@ impl Tab {
 
     pub fn showing_results(&self) -> bool {
         self.extras.results.shown()
+    }
+
+    /// Where the keys go: the list shown, which moves its own selection, or the listing's box
+    /// while a slow, failed or empty folder shows none. An empty list draws its empty state in
+    /// its own place, so a focus left on it would go with it.
+    pub fn focus_target(&self) -> &'static str {
+        if self.extras.results.shown() {
+            return crate::results::TABLE;
+        }
+        match (&self.load, self.view) {
+            (Load::Slow | Load::Failed(_), _) => VIEW_ID,
+            (_, View::List | View::Grid) if self.list_state().is_empty() => VIEW_ID,
+            (_, View::List) => TABLE_ID,
+            (_, View::Grid) => GRID_ID,
+            (_, View::Columns) => crate::columns::CURRENT,
+        }
     }
 
     /// Puts back a selection the search text hid.

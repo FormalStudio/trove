@@ -14,13 +14,15 @@ use crate::pathbar::PathBar;
 use crate::preview::Preview;
 use crate::sidebar::Sidebar;
 use crate::status::StatusBar;
-use crate::tab::{Move, Tab, View};
+use crate::tab::{Tab, View};
 
 /// The widest a tab gets, as in Explorer: a few tabs keep their titles instead of each taking
 /// a share of the window.
 const TAB_W: f32 = 220.;
 /// The strip's `+` past the last tab.
 const ADD_W: f32 = 44.;
+/// The sidebar's width until the user drags it.
+const SIDEBAR_W: f32 = 232.;
 
 /// Where the first tab opens.
 #[derive(Clone, Debug, PartialEq)]
@@ -57,9 +59,8 @@ pub struct Root {
     quicklook: Entity<crate::quicklook::QuickLook>,
     show_preview: bool,
     show_hidden: bool,
-    /// The search bar under the tabs is open: Ctrl+F or the toolbar's toggle opened it, and Esc
-    /// or the toggle closes it. A tab with a filter typed keeps it open too.
-    searching: bool,
+    sidebar_w: f32,
+    preview_w: f32,
     chrome: Option<Chrome>,
     titles: Vec<String>,
     size: (f32, f32),
@@ -105,7 +106,8 @@ impl Root {
             quicklook: cx.new(crate::quicklook::QuickLook::new),
             show_preview: false,
             show_hidden: prefs.show_hidden,
-            searching: false,
+            sidebar_w: SIDEBAR_W,
+            preview_w: crate::preview::PANE_W,
             chrome: None,
             titles: Vec::new(),
             size: (0., 0.),
@@ -127,6 +129,12 @@ impl Root {
                     this.tabs.push((id, tab));
                 }
                 this.show_preview = session.show_preview;
+                if session.sidebar_width > 0. {
+                    this.sidebar_w = session.sidebar_width;
+                }
+                if session.preview_width > 0. {
+                    this.preview_w = session.preview_width;
+                }
                 active = session.active;
             }
             Start::Home | Start::Path(_) => {}
@@ -143,6 +151,8 @@ impl Root {
             let id = this.take_id();
             this.tabs.push((id, tab));
         }
+        let preview_w = this.preview_w;
+        this.preview.update(cx, |p, cx| p.set_width(preview_w, cx));
         this.register_drops();
         this.activate(active, window, cx);
         this
@@ -152,6 +162,15 @@ impl Root {
 
     pub fn tabs(&self) -> Vec<Entity<Tab>> {
         self.tabs.iter().map(|(_, t)| t.clone()).collect()
+    }
+
+    /// The tabs' ids, which the tab menus' actions carry, in strip order.
+    pub fn tab_ids(&self) -> Vec<u64> {
+        self.tabs.iter().map(|(id, _)| *id).collect()
+    }
+
+    pub fn widths(&self) -> (f32, f32) {
+        (self.sidebar_w, self.preview_w)
     }
 
     pub fn active_tab(&self) -> &Entity<Tab> {
@@ -243,17 +262,9 @@ impl Root {
         cx.notify();
     }
 
-    /// Keys go to the listing.
-    pub(crate) fn focus_files(&self, window: &mut Window, _cx: &App) {
-        window.focus(crate::tab::VIEW_ID);
-    }
-
-    /// Up and Down step a whole row of tiles in the grid.
-    fn move_rows(&mut self, by: isize, extend: bool, cx: &mut Context<Self>) {
-        self.with_tab(cx, |t, cx| {
-            let by = by * t.lanes() as isize;
-            t.move_selection(if extend { Move::Extend(by) } else { Move::By(by) }, cx);
-        });
+    /// Keys go to the list the active tab shows.
+    pub(crate) fn focus_files(&self, window: &mut Window, cx: &App) {
+        window.focus(self.active_tab().read(cx).focus_target());
     }
 
     fn sync_chrome(&mut self, cx: &mut Context<Self>) {
@@ -366,25 +377,32 @@ impl Root {
         crate::settings::set(cx, "show_hidden", &show);
     }
 
-    fn duplicate_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    /// A copy of the tab with id `of`, right after it and selected.
+    fn duplicate_tab(&mut self, of: u64, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(from) = self.position(of) else { return };
         let (location, view, sort) = {
-            let tab = self.active_tab().read(cx);
+            let tab = self.tabs[from].1.read(cx);
             (tab.location().clone(), tab.view(), tab.sort())
         };
         let tab = self.make_tab(location, view, cx);
         tab.update(cx, |t, cx| t.set_sort(sort, cx));
-        let at = self.active + 1;
+        let at = from + 1;
         let id = self.take_id();
         self.tabs.insert(at, (id, tab));
         self.refresh_titles(cx);
         self.activate(at, window, cx);
     }
 
-    fn close_other_tabs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let keep = self.tabs.remove(self.active);
+    fn close_other_tabs(&mut self, keep: u64, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(at) = self.position(keep) else { return };
+        let keep = self.tabs.remove(at);
         self.tabs = vec![keep];
         self.refresh_titles(cx);
         self.activate(0, window, cx);
+    }
+
+    fn position(&self, id: u64) -> Option<usize> {
+        self.tabs.iter().position(|(n, _)| *n == id)
     }
 
     /// The tabs as the next launch reopens them. Kept on every change; the store writes it a
@@ -407,6 +425,8 @@ impl Root {
             width: self.size.0,
             height: self.size.1,
             show_preview: self.show_preview,
+            sidebar_width: self.sidebar_w,
+            preview_width: self.preview_w,
         };
         crate::session::save(cx, session);
     }
@@ -460,12 +480,10 @@ impl Root {
 
     fn tab_strip(&self) -> impl IntoElement + use<> {
         let count = self.tabs.len();
-        // nd: tab_strip takes no context menu per tab, so the menu acts on the active one.
         h_flex()
             .id("tab-strip")
             .w_full()
             .child(div().flex_1().min_w_0().max_w(px(TAB_W * count as f32 + ADD_W)).child(self.tab_bar()))
-            .context_menu(move |menu, _, _| crate::menus::tabs(menu, count))
     }
 
     fn tab_bar(&self) -> TabStrip {
@@ -477,6 +495,7 @@ impl Root {
             closable: true,
         });
         let (select, close, add, drop) = (self.me(), self.me(), self.me(), self.me());
+        let count = self.tabs.len();
         tab_strip("tabs")
             .presentation(TabStyle::Strip)
             .add_button(true)
@@ -496,6 +515,10 @@ impl Root {
                         this.close_tab(i, window, cx);
                     }
                 });
+            })
+            .context_menu(move |id, menu, _, _| match tab_id(id) {
+                Some(id) => crate::menus::tab(menu, id, count),
+                None => menu,
             })
             .on_add(move |_: &TabAddRequested, window, cx| {
                 let _ = add.update(cx, |this, cx| {
@@ -523,42 +546,14 @@ impl Root {
     }
 
     fn index_of(&self, id: &str) -> Option<usize> {
-        self.tabs.iter().position(|(n, _)| format!("tab-{n}") == id)
-    }
-
-    fn search_shown(&self, cx: &App) -> bool {
-        self.searching || !self.active_tab().read(cx).query().is_empty()
-    }
-
-    /// The search bar: under the tab strip, right over the listing it filters.
-    fn search_bar(&self, cx: &mut Context<Self>) -> Option<impl IntoElement + use<>> {
-        if !self.search_shown(cx) {
-            return None;
-        }
-        let title = self.chrome.as_ref().map(|c| c.title.clone()).unwrap_or_default();
-        let search = self.active_tab().read(cx).search().clone();
-        let theme = cx.theme();
-        Some(
-            h_flex()
-                .id("search-bar")
-                .w_full()
-                .justify_center()
-                .p(theme.spacing.sm)
-                .border_b_1()
-                .border_color(theme.border.subtle)
-                .child(
-                    search_field("search", &search)
-                        .placeholder(format!("Search {title}"))
-                        .key_context(SEARCH)
-                        .w(px(360.)),
-                ),
-        )
+        tab_id(id).and_then(|id| self.position(id))
     }
 
     fn toolbar(&self, cx: &mut Context<Self>) -> Toolbar {
         let chrome = self.chrome.clone();
         let (can_back, can_forward) = chrome.as_ref().map_or((false, false), |c| (c.can_back, c.can_forward));
-        let searching = self.search_shown(cx);
+        let title = chrome.as_ref().map(|c| c.title.clone()).unwrap_or_default();
+        let search = self.active_tab().read(cx).search().clone();
         toolbar()
             .hide_title()
             .navigation(icon_button("back", Icon::ChevronLeft).tooltip("Back").disabled(!can_back).dispatch(Back))
@@ -568,10 +563,9 @@ impl Root {
             .item(self.pathbar.clone())
             .flexible_space()
             .item(self.view_switch())
-            .item({
-                let toggle = icon_button("search-toggle", Icon::Search).tooltip("Search").checked(searching);
-                if searching { toggle.dispatch(ClearSearch) } else { toggle.dispatch(FocusSearch) }
-            })
+            .persistent_search(
+                search_field("search", &search).placeholder(format!("Search {title}")).key_context(SEARCH).w(px(240.)),
+            )
             .item(
                 icon_button("preview-toggle", Icon::PanelRight)
                     .tooltip("Preview")
@@ -584,10 +578,19 @@ impl Root {
         let root = crate::fileops::register(root, cx);
         let root = crate::keys::on_root(root, cx);
         root.on_action(cx.listener(Self::open))
-            .on_action(cx.listener(|this, _: &DuplicateTab, window, cx| this.duplicate_tab(window, cx)))
-            .on_action(cx.listener(|this, _: &CloseOtherTabs, window, cx| this.close_other_tabs(window, cx)))
-            .on_action(cx.listener(|this, OpenPlaceInNewTab(path): &OpenPlaceInNewTab, window, cx| {
-                this.new_tab(Location::Dir(path.clone()), false, window, cx)
+            .on_action(
+                cx.listener(|this, DuplicateTab(id): &DuplicateTab, window, cx| this.duplicate_tab(*id, window, cx)),
+            )
+            .on_action(cx.listener(|this, CloseOtherTabs(id): &CloseOtherTabs, window, cx| {
+                this.close_other_tabs(*id, window, cx)
+            }))
+            .on_action(cx.listener(|this, CloseTabWithId(id): &CloseTabWithId, window, cx| {
+                if let Some(at) = this.position(*id) {
+                    this.close_tab(at, window, cx);
+                }
+            }))
+            .on_action(cx.listener(|this, OpenPlaceInNewTab(at): &OpenPlaceInNewTab, window, cx| {
+                this.new_tab(at.clone(), false, window, cx)
             }))
             .on_action(cx.listener(Self::open_in_new_tab))
             .on_action(cx.listener(Self::enter_folder))
@@ -606,7 +609,10 @@ impl Root {
             .on_action(
                 cx.listener(|this, GoTo(path): &GoTo, window, cx| this.go(Location::Dir(path.clone()), window, cx)),
             )
-            .on_action(cx.listener(|this, _: &Deselect, window, cx| this.with_tab(cx, |t, cx| t.deselect(window, cx))))
+            .on_action(cx.listener(|this, _: &Deselect, window, cx| {
+                this.with_tab(cx, |t, cx| t.deselect(window, cx));
+                this.focus_files(window, cx);
+            }))
             .on_action(cx.listener(|this, _: &ListView, _, cx| this.with_tab(cx, |t, cx| t.set_view(View::List, cx))))
             .on_action(cx.listener(|this, _: &GridView, _, cx| this.with_tab(cx, |t, cx| t.set_view(View::Grid, cx))))
             .on_action(cx.listener(|this, _: &TogglePreview, _, cx| {
@@ -625,17 +631,11 @@ impl Root {
             .on_action(
                 cx.listener(|this, _: &CompletePath, _, cx| this.pathbar.clone().update(cx, |p, cx| p.complete(cx))),
             )
-            .on_action(cx.listener(|this, _: &FocusSearch, window, cx| {
-                this.searching = true;
-                cx.notify();
-                window.focus("search");
-            }))
+            .on_action(cx.listener(|_, _: &FocusSearch, window, _| window.focus("search")))
             .on_action(cx.listener(|this, _: &ClearSearch, window, cx| {
                 this.with_tab(cx, |t, cx| {
                     t.clear_search(window, cx);
                 });
-                this.searching = false;
-                cx.notify();
                 this.focus_files(window, cx);
             }))
             .on_action(cx.listener(|this, _: &NewTab, window, cx| {
@@ -653,36 +653,16 @@ impl Root {
                     this.activate(*n, window, cx);
                 }
             }))
-            .on_action(cx.listener(|this, _: &MoveUp, _, cx| this.move_rows(-1, false, cx)))
-            .on_action(cx.listener(|this, _: &MoveDown, _, cx| this.move_rows(1, false, cx)))
-            .on_action(cx.listener(|this, _: &ExtendUp, _, cx| this.move_rows(-1, true, cx)))
-            .on_action(cx.listener(|this, _: &ExtendDown, _, cx| this.move_rows(1, true, cx)))
             .on_action(
-                cx.listener(|this, _: &MoveHome, _, cx| this.with_tab(cx, |t, cx| t.move_selection(Move::Home, cx))),
+                cx.listener(|this, _: &MoveLeft, _, cx| this.with_tab(cx, |t, cx| crate::columns::step(t, -1, cx))),
             )
             .on_action(
-                cx.listener(|this, _: &MoveEnd, _, cx| this.with_tab(cx, |t, cx| t.move_selection(Move::End, cx))),
+                cx.listener(|this, _: &MoveRight, _, cx| this.with_tab(cx, |t, cx| crate::columns::step(t, 1, cx))),
             )
-            .on_action(
-                cx.listener(|this, _: &SelectAll, _, cx| this.with_tab(cx, |t, cx| t.move_selection(Move::All, cx))),
-            )
-            .on_action(cx.listener(|this, _: &MoveLeft, _, cx| this.step_sideways(-1, cx)))
-            .on_action(cx.listener(|this, _: &MoveRight, _, cx| this.step_sideways(1, cx)))
             .on_action(cx.listener(|this, TypeSelect(c): &TypeSelect, window, cx| {
                 let now = window.now();
                 this.with_tab(cx, |t, cx| t.type_select(*c, now, cx));
             }))
-    }
-
-    /// Left and Right: the next tile in the grid; in the columns view out to the folder above,
-    /// or into the one under the cursor.
-    fn step_sideways(&mut self, by: isize, cx: &mut Context<Self>) {
-        self.with_tab(cx, |t, cx| match t.view() {
-            _ if t.showing_results() => {}
-            View::Grid => t.move_selection(Move::By(by), cx),
-            View::Columns => crate::columns::step(t, by, cx),
-            View::List => {}
-        });
     }
 }
 
@@ -710,20 +690,38 @@ impl Render for Root {
             .size_full()
             .on_navigate(|e: &NavigateEvent, window, cx| history(e, window, cx))
             .children(tabs)
-            .children(self.search_bar(cx))
             .child(div().flex_1().min_h_0().child(self.active_tab().clone()))
             .child(self.status.clone())
             .child(self.quicklook.clone());
         let root = scaffold()
             .key_context(WINDOW)
             .toolbar(self.toolbar(cx))
-            // nd: the sidebar and inspector panes report no width change, so the session keeps
-            // neither width.
-            .sidebar(sidebar().width(px(232.)).child(self.sidebar.clone()))
+            .sidebar(
+                sidebar()
+                    .resizable()
+                    .min_w(px(180.))
+                    .max_w(px(400.))
+                    .width(px(self.sidebar_w))
+                    .on_resize(cx.listener(|this, e: &nd::components::PaneResized, _, cx| {
+                        this.sidebar_w = e.width;
+                        this.save_session(cx);
+                        cx.notify();
+                    }))
+                    .child(self.sidebar.clone()),
+            )
             .content(content)
             .inspector(
                 inspector()
-                    .width(px(260.))
+                    .resizable()
+                    .min_w(px(220.))
+                    .max_w(px(480.))
+                    .width(px(self.preview_w))
+                    .on_resize(cx.listener(|this, e: &nd::components::PaneResized, _, cx| {
+                        this.preview_w = e.width;
+                        this.preview.update(cx, |p, cx| p.set_width(e.width, cx));
+                        this.save_session(cx);
+                        cx.notify();
+                    }))
                     .collapsed(!self.show_preview)
                     .on_collapse_change(cx.listener(|this, e: &PaneCollapsed, _, cx| {
                         this.show_preview = !e.collapsed;
@@ -734,4 +732,9 @@ impl Render for Root {
             );
         self.actions(root, cx)
     }
+}
+
+/// The tab a strip id names: `tab-<n>`, as [`Root::tab_bar`] mints them.
+fn tab_id(strip_id: &str) -> Option<u64> {
+    strip_id.strip_prefix("tab-")?.parse().ok()
 }

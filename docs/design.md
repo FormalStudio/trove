@@ -317,19 +317,24 @@ index is over 5 minutes old a query also walks its scope 3 levels deep to catch 
 
 - Toolbar: back, forward, the path bar (breadcrumb segments; click one to go there, right-click
   for its siblings, Ctrl+L or a click on the empty end turns it into a text field with path
-  completion), view switch (list, grid, columns), the search field (scoped to the current
-  folder, a toggle to search everywhere), the preview toggle.
+  completion), view switch (list, grid, columns), the search field, always there as in Finder
+  (scoped to the current folder, a toggle to search everywhere), the preview toggle.
 - Tabs, Explorer-style: Ctrl+T new tab at the current folder, Ctrl+W close, Ctrl+Tab and
   Ctrl+Shift+Tab, Ctrl+1..9, middle-click a folder or Ctrl+Enter to open it in a new tab, drag a
-  file onto a tab to move it there. Each tab keeps its own history, selection, scroll, view and
-  sort. The tab strip hides with one tab, like GNOME Files.
+  file onto a tab to move it there. Middle-click a tab to close it; right-click it for Duplicate,
+  Close and Close others. Each tab keeps its own history, selection, scroll, view and sort. The
+  tab strip hides with one tab, like GNOME Files.
 - Sidebar: Favourites (XDG dirs, Recent), Bookmarks (GTK file, drag a folder in to add),
-  Devices (internal and removable volumes, a usage bar filled in when statvfs answers, an eject
-  button), Network (network mounts, never touched until clicked), Trash.
+  Devices (internal and removable volumes, the free space under the name over a usage meter
+  filled in when statvfs answers, an eject button), Network (network mounts, never touched until
+  clicked), Trash. Each row has its own menu (Open in new tab, bookmark or unbookmark, Eject,
+  Empty Trash) and a middle click opens it in a new tab. The sidebar and the preview pane resize
+  by their edges.
 - List view: a `table` with Name, Size, Kind, Modified (Created optional), sortable, folders
   first, natural order, folders expandable inline (disclosure, Right/Left keys) like Finder.
 - Grid view: icons with thumbnails, filled in as they arrive.
-- Columns view: Finder's Miller columns, one `list` per level, the last column the preview.
+- Columns view: Finder's Miller columns, one `list` per level, the last column the preview,
+  scrolling sideways to keep the active column in view.
 - Preview pane: the selection's preview and its info, loaded 60 ms after the selection settles;
   several selected show their count and total size. Space opens Quick Look (a cover over the
   window with the same content larger and "Open with <app>"; arrows step through the selection,
@@ -345,7 +350,8 @@ index is over 5 minutes old a query also walks its scope 3 levels deep to catch 
   Sort by, View), on the sidebar and on the tab strip. The Trash lists Original location and
   Date deleted from `.trashinfo`, under a banner with Empty Trash.
 - Drag and drop: rows and tiles onto folders, breadcrumb segments and the folder shown; one
-  file system moves, another copies. Files dropped from other apps land in the folder shown.
+  file system moves, another copies; Ctrl held copies and Shift held moves. Files dropped from
+  other apps land in the folder shown.
 
 ### Keys
 
@@ -386,5 +392,4 @@ default view, single-click to open, confirm before trash (off), search exclusion
 on network mounts (off). Session in `$XDG_STATE_HOME/trove/session.json`, written a moment after
 each change on its own thread: the open tabs with their paths, views and sorts, the active tab,
 the window size and whether the preview shows. Restored at launch, when no path is given,
-without waiting on any of the paths. The sidebar and preview widths are not kept: nd's panes
-report no width change yet.
+without waiting on any of the paths, with the sidebar and preview widths as last dragged.

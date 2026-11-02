@@ -262,25 +262,18 @@ fn the_list_owns_the_selection_and_the_cursor() {
 }
 
 #[test]
-fn keys_move_the_selection_until_the_list_is_pressed() {
+fn the_list_shown_has_the_keys() {
     let mut h = Harness::new();
-    h.act(MoveDown);
-    assert_eq!(h.selected(), ["Desktop"]);
-    h.act(MoveDown);
-    h.act(ExtendDown);
-    assert_eq!(h.selected(), ["Documents", "Downloads"]);
-    h.act(ExtendUp);
-    assert_eq!(h.selected(), ["Documents"], "Shift and the other arrow shrinks the range back");
-    h.act(MoveEnd);
-    assert_eq!(h.selected(), ["todo.txt"]);
-    h.act(MoveDown);
-    assert_eq!(h.selected(), ["todo.txt"], "the last row stays put");
-    h.act(MoveHome);
-    assert_eq!(h.selected(), ["Desktop"]);
-    h.act(SelectAll);
-    assert_eq!(h.selected().len(), ROOT_NAMES.len());
-    h.act(Deselect);
-    assert!(h.selected().is_empty());
+    let window = h.window.id();
+    let focused = |h: &mut Harness, id: &str| nd::test::by_test_id(&mut h.cx, window, id).is_some_and(|n| n.focused);
+    h.act(FocusFiles);
+    assert!(focused(&mut h, "files-table"), "{}", h.cx.semantic_tree().snapshot());
+    h.act(GridView);
+    assert!(focused(&mut h, "files-grid"), "the grid takes the keys from the table it replaced");
+    h.act(trove::keys::ColumnsView);
+    assert!(focused(&mut h, "files-columns"), "the tab's own column has them in the columns view");
+    h.act(ListView);
+    assert!(focused(&mut h, "files-table"));
 }
 
 #[test]
@@ -298,7 +291,7 @@ fn the_grid_and_columns_select_through_their_own_lists() {
 fn search_filters_by_name_and_escape_clears() {
     let mut h = Harness::new();
     let window = h.window.id();
-    assert!(nd::test::by_test_id(&mut h.cx, window, "search").is_none(), "search starts closed");
+    assert!(nd::test::by_test_id(&mut h.cx, window, "search").is_some(), "the search field always shows");
     h.act(FocusSearch);
     let field = nd::test::by_test_id(&mut h.cx, window, "search").expect("a search field");
     h.cx.emit(field.id, nd::components::TextChanged { text: "do".into() });
@@ -309,7 +302,11 @@ fn search_filters_by_name_and_escape_clears() {
 
     h.act(ClearSearch);
     assert_eq!(h.names(), ROOT_NAMES);
-    assert!(nd::test::by_test_id(&mut h.cx, window, "search").is_none(), "escape closes search");
+    assert_eq!(h.tab().read(&h.cx).query(), "", "escape clears the search");
+    assert!(
+        nd::test::by_test_id(&mut h.cx, window, "files-table").is_some_and(|n| n.focused),
+        "and the list has the keys"
+    );
 
     h.act(FocusSearch);
     let field = nd::test::by_test_id(&mut h.cx, window, "search").expect("a search field");

@@ -32,13 +32,6 @@ actions!(
         MoveRight,
         Deselect,
         FocusFiles,
-        MoveUp,
-        MoveDown,
-        ExtendUp,
-        ExtendDown,
-        MoveHome,
-        MoveEnd,
-        SelectAll,
         Copy,
         Cut,
         Paste,
@@ -58,8 +51,6 @@ actions!(
         Restore,
         EmptyTrash,
         ToggleFoldersFirst,
-        CloseOtherTabs,
-        DuplicateTab,
     ]
 );
 
@@ -81,7 +72,12 @@ pub struct SortBy(pub trove_fs::SortKey);
 /// A sidebar place or volume, from the sidebar's menu.
 #[derive(Clone, PartialEq, Debug, Action)]
 #[action(namespace = trove, no_json)]
-pub struct OpenPlaceInNewTab(pub PathBuf);
+pub struct OpenPlaceInNewTab(pub crate::location::Location);
+
+/// A sidebar folder that is no bookmark yet, from its menu.
+#[derive(Clone, PartialEq, Debug, Action)]
+#[action(namespace = trove, no_json)]
+pub struct BookmarkPlace(pub PathBuf);
 
 #[derive(Clone, PartialEq, Debug, Action)]
 #[action(namespace = trove, no_json)]
@@ -101,6 +97,19 @@ pub struct DropOnto {
     pub mode: crate::fileops::Transfer,
 }
 
+/// A tab's menu: the commands on the tab it opened on, by the tab's id.
+#[derive(Clone, PartialEq, Debug, Action)]
+#[action(namespace = trove, no_json)]
+pub struct DuplicateTab(pub u64);
+
+#[derive(Clone, PartialEq, Debug, Action)]
+#[action(namespace = trove, no_json)]
+pub struct CloseOtherTabs(pub u64);
+
+#[derive(Clone, PartialEq, Debug, Action)]
+#[action(namespace = trove, no_json)]
+pub struct CloseTabWithId(pub u64);
+
 /// Alt+1..9: the tab at that position, Explorer's order.
 #[derive(Clone, PartialEq, Debug, Action)]
 #[action(namespace = trove, no_json)]
@@ -118,8 +127,11 @@ pub struct GoTo(pub PathBuf);
 
 /// The whole window: everything inside the root view.
 pub const WINDOW: &str = "Trove";
-/// The listing, while it has focus.
+/// The listing's box: its keys match while the list inside it has focus.
 pub const FILES: &str = "Files";
+/// The columns view, around its lists: Left and Right move between columns, where every other
+/// view leaves them to its list.
+pub const COLUMNS: &str = "Columns";
 pub const SEARCH: &str = "Search";
 pub const PATH_EDIT: &str = "PathEdit";
 /// The listing while one of its names is being edited: the listing's own keys (type-select,
@@ -155,15 +167,8 @@ pub fn bind(cx: &mut App) {
         KeyBinding::new("secondary-enter", OpenInNewTab, f),
         KeyBinding::new("backspace", Parent, f),
         KeyBinding::new("escape", Deselect, f),
-        KeyBinding::new("up", MoveUp, f),
-        KeyBinding::new("down", MoveDown, f),
-        KeyBinding::new("shift-up", ExtendUp, f),
-        KeyBinding::new("shift-down", ExtendDown, f),
-        KeyBinding::new("home", MoveHome, f),
-        KeyBinding::new("end", MoveEnd, f),
-        KeyBinding::new("secondary-a", SelectAll, f),
-        KeyBinding::new("left", MoveLeft, f),
-        KeyBinding::new("right", MoveRight, f),
+        KeyBinding::new("left", MoveLeft, Some(COLUMNS)),
+        KeyBinding::new("right", MoveRight, Some(COLUMNS)),
         KeyBinding::new("secondary-c", Copy, f),
         KeyBinding::new("secondary-x", Cut, f),
         KeyBinding::new("secondary-v", Paste, f),

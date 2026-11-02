@@ -12,8 +12,8 @@ use std::time::Duration;
 
 use nd::components::services::{AlertCallback, Chrome, ChromeServices, OpenCallback, SaveCallback};
 use nd::components::{
-    Alert, AlertResponse, ContextMenu, ContextMenuRequested, Menu, MenuItem, OpenDialog, SaveDialog, TextCancelled,
-    TextEditingEnded,
+    Alert, AlertResponse, ContextMenu, ContextMenuRequested, Menu, MenuItem, OpenDialog, SaveDialog,
+    SourceMenuRequested, TabMenuRequested, TextCancelled, TextEditingEnded,
 };
 use nd::core::{NodeId, WindowId};
 use nd::prelude::*;
@@ -180,6 +180,22 @@ impl Harness {
         self.tab().read(&self.cx).renaming().cloned()
     }
 
+    /// Right-clicks the tab with id `tab` and returns its menu.
+    fn menu_on_tab(&mut self, tab: u64) -> Vec<String> {
+        let node = self.node("tabs");
+        self.cx.emit(node, TabMenuRequested { node, id: format!("tab-{tab}").into(), x: 4., y: 4. });
+        self.settle();
+        self.platform.menus.borrow_mut().pop().expect("a tab menu")
+    }
+
+    /// Right-clicks the sidebar row `id` and returns its menu.
+    fn menu_on_place(&mut self, id: &str) -> Vec<String> {
+        let node = self.node("places");
+        self.cx.emit(node, SourceMenuRequested { node, id: id.to_owned().into(), x: 4., y: 4. });
+        self.settle();
+        self.platform.menus.borrow_mut().pop().expect("a sidebar menu")
+    }
+
     /// Right-clicks the node with `test_id` and returns the menu the platform was asked for.
     fn menu_on(&mut self, test_id: &str) -> Vec<String> {
         let id = self.window.id();
@@ -317,14 +333,47 @@ fn a_conflict_waits_for_an_answer() {
 }
 
 #[test]
-fn duplicate_and_new_tab_from_the_tab_menu_actions() {
-    let mut h = Harness::new(&["a.txt"]);
-    h.act(DuplicateTab);
+fn each_tab_has_its_own_menu() {
+    let mut h = Harness::new(&["a.txt", "b/"]);
     let root = h.root();
+    let first = root.read(&h.cx).tab_ids()[0];
+    h.act(DuplicateTab(first));
     assert_eq!(root.read(&h.cx).tabs().len(), 2);
     assert_eq!(h.tab().read(&h.cx).location(), &Location::Dir(h.work()));
-    h.act(CloseOtherTabs);
-    assert_eq!(root.read(&h.cx).tabs().len(), 1);
+    let second = root.read(&h.cx).tab_ids()[1];
+    assert_eq!(h.menu_on_tab(first), ["Duplicate tab", "-", "Close tab", "Close other tabs"]);
+    assert_eq!(root.read(&h.cx).active_index(), 1, "the menu leaves the tab it opened on unselected");
+
+    h.act(CloseOtherTabs(first));
+    assert_eq!(root.read(&h.cx).tab_ids(), [first], "the tab the menu opened on stays, not the active one");
+    h.act(DuplicateTab(first));
+    h.act(CloseTabWithId(first));
+    assert_eq!(root.read(&h.cx).tab_ids().len(), 1);
+    assert_ne!(root.read(&h.cx).tab_ids()[0], second);
+}
+
+#[test]
+fn each_sidebar_row_has_its_own_menu_and_a_middle_click_opens_a_tab() {
+    let mut h = Harness::new(&["a.txt", "b/"]);
+    let documents = h.home.join("Documents");
+    let id = format!("place:{}", documents.display());
+    assert_eq!(h.menu_on_place(&id), ["Open in new tab", "-", "Add to bookmarks"]);
+    assert_eq!(h.menu_on_place("trash"), ["Open in new tab", "-", "Empty Trash"]);
+    assert_eq!(h.menu_on_place("recent"), ["Open in new tab"]);
+    assert_eq!(h.tab().read(&h.cx).location(), &Location::Dir(h.work()), "a right click opens no place");
+
+    h.act(BookmarkPlace(documents.clone()));
+    let bookmark = h.menu_on_place(&id);
+    assert_eq!(bookmark, ["Open in new tab", "-", "Remove from bookmarks"], "{bookmark:?}");
+
+    let places = h.node("places");
+    h.cx.emit(places, nd::components::SourceMiddleClicked { id: id.into() });
+    h.settle();
+    let root = h.root();
+    let tabs = root.read(&h.cx).tabs();
+    assert_eq!(tabs.len(), 2);
+    assert_eq!(tabs[1].read(&h.cx).location(), &Location::Dir(documents));
+    assert_eq!(root.read(&h.cx).active_index(), 0, "the new tab opens behind the active one");
 }
 
 #[test]

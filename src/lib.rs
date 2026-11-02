@@ -70,7 +70,23 @@ pub fn open(cx: &mut App, start: Start) -> WindowHandle<Root> {
     let (start, (w, h)) = restore(start, cx);
     let options =
         WindowOptions::main("main").title("Trove").size(size(px(w), px(h))).min_size(size(px(640.), px(400.)));
-    cx.open_window(options, move |window, cx| cx.new(|cx| Root::new(start, window, cx)))
+    let window = cx.open_window(options, move |window, cx| cx.new(|cx| Root::new(start, window, cx)));
+    focus_listing(window.clone(), 30);
+    window
+}
+
+/// Gives the listing the keys once the window's first frames have mounted it: a focus asked
+/// for while the window is being built finds nothing to land on yet.
+fn focus_listing(window: WindowHandle<Root>, tries: u8) {
+    if !pump::live() || tries == 0 {
+        return;
+    }
+    nd::system::spawn(async {}, move |_, cx| {
+        let target = window.root().read(cx).active_tab().read(cx).focus_target();
+        if !cx.focus_id(window.id(), target) {
+            focus_listing(window, tries - 1);
+        }
+    });
 }
 
 /// A window on the demo fixture, for tests and the appearance audit, with the first listing

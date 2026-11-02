@@ -1,5 +1,5 @@
-//! The session: the open tabs with their folders, views and sorts, the window size and
-//! whether the preview shows. Kept in a `Store` (JSON in the state folder, written debounced on its own
+//! The session: the open tabs with their folders, views and sorts, the window size, the pane
+//! widths and whether the preview shows. Kept in a `Store` (JSON in the state folder, written debounced on its own
 //! thread) and read back at launch without touching any of the paths it names.
 
 use std::path::PathBuf;
@@ -20,6 +20,9 @@ pub struct Session {
     pub width: f32,
     pub height: f32,
     pub show_preview: bool,
+    /// The sidebar's and the preview pane's widths, as the user last dragged them; 0 is unset.
+    pub sidebar_width: f32,
+    pub preview_width: f32,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

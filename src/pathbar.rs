@@ -315,7 +315,7 @@ impl Render for PathBar {
                         let tab_dest = dest.clone();
                         crumb
                             .on_middle_click(move |_: &MiddleClickEvent, window, cx| {
-                                cx.dispatch_action(window.id(), &OpenPlaceInNewTab(tab_dest.clone()));
+                                cx.dispatch_action(window.id(), &OpenPlaceInNewTab(Location::Dir(tab_dest.clone())));
                             })
                             .accepts_drops([DRAG_FILES, DragItem::FILES])
                             .on_drop(move |e: &Dropped, window, cx| {

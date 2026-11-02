@@ -194,16 +194,6 @@ impl Results {
         }
     }
 
-    pub fn move_selection(&mut self, to: crate::tab::Move, cx: &mut App) {
-        let selected = self.selected();
-        let Some((keys, cursor)) = crate::tab::moved(&self.rows, &selected, self.cursor, to) else { return };
-        self.cursor = cursor;
-        self.list.set_selected(keys, cx);
-        if let Some(at) = cursor {
-            self.list.scroll_to(at, Align::Nearest, px(0.), cx);
-        }
-    }
-
     /// Down in the search field: the best result, selected.
     pub fn select_first(&mut self, cx: &mut App) {
         if let Some(id) = self.rows.first().copied() {
@@ -565,12 +555,10 @@ impl Tab {
                 .min_w_0()
                 .child(icon(icons::for_kind(row.kind), 16.).text_color(icons::tint(row.kind, theme)))
                 .child(
-                    // nd: rich text sizes at 16px unless told, and its runs do not shrink.
-                    div().flex_1().min_w_0().overflow_hidden().child(
-                        highlighted(&row.name, &row.matches, row.name.starts_with('.'))
-                            .text_size(theme.type_scale.body)
-                            .truncate(),
-                    ),
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .child(highlighted(&row.name, &row.matches, row.name.starts_with('.')).truncate()),
                 )
                 .into_any_element(),
             1 => quiet(row.place.clone()),
@@ -663,8 +651,7 @@ pub fn render(tab: &mut Tab, width: f32, cx: &mut Context<Tab>) -> AnyElement {
     let table = table(TABLE, &r.list, columns(width), move |id, col, w, cx| cell((id, col), w, cx))
         .selection(Selection::multiple())
         .estimated_row_height(px(crate::tab::ROW_HEIGHT))
-        .on_selection_change(move |e: &SelectionChanged<EntryId>, window, cx| {
-            crate::tab::take_keys(window);
+        .on_selection_change(move |e: &SelectionChanged<EntryId>, _, cx| {
             let _ = sel.update(cx, |t, cx| {
                 t.extras.results.on_selection_change(e);
                 cx.notify();

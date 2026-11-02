@@ -2,7 +2,8 @@
 //! then the folder under the cursor, or the preview of the file under it. The tab's folder is
 //! the tab's own listing; the folders above it are listed once and kept while the tab moves
 //! among them, the one under the cursor is listed as the cursor reaches it. A move between
-//! columns changes the tab's folder without adding to its history.
+//! columns changes the tab's folder without adding to its history. The columns scroll sideways
+//! from the start folder on, the keyboard's column and what follows it kept in view.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -12,6 +13,7 @@ use std::time::Duration;
 use nd::prelude::*;
 use trove_fs::{Change, Entry, EntryId, EntryKind, ListEvent, ListOptions, Listing, SortOrder};
 
+use crate::actions::COLUMNS;
 use crate::icons;
 use crate::location::Location;
 use crate::preview::{Item, Preview};
@@ -22,6 +24,9 @@ const COLUMN_W: f32 = 220.;
 const PREVIEW_MIN: f32 = 280.;
 /// The tab's own column.
 pub const CURRENT: &str = "files-columns";
+/// The folder under the cursor.
+const NEXT: &str = "column-next";
+const PREVIEW_ID: &str = "column-preview";
 
 pub struct Columns {
     /// The tab's own folder, the column the keyboard is in.
@@ -29,6 +34,9 @@ pub struct Columns {
     levels: Vec<Level>,
     child: Option<Level>,
     preview: Option<Entity<Preview>>,
+    /// What the last frame showed past the start: the tab's folder, the folder under the
+    /// cursor and the file previewed. A change scrolls the end of the row into view.
+    shown: Option<(PathBuf, Option<PathBuf>, Option<PathBuf>)>,
 }
 
 struct Level {
@@ -50,6 +58,7 @@ impl Columns {
             levels: Vec::new(),
             child: None,
             preview: None,
+            shown: None,
         }
     }
 
@@ -323,17 +332,18 @@ impl Tab {
     }
 }
 
-/// The columns view: as many of the last columns as fit `width`, the preview taking the rest.
-pub fn render(tab: &mut Tab, width: f32, cx: &mut Context<Tab>) -> AnyElement {
+/// The columns view: every column from the start folder on in a row that scrolls sideways,
+/// then the preview of the file under the cursor.
+pub fn render(tab: &mut Tab, cx: &mut Context<Tab>) -> AnyElement {
     sync(tab, cx);
     let me = cx.weak_entity();
 
-    let file = tab
+    let file_path = tab
         .cursor()
         .filter(|_| tab.selected().len() == 1)
         .filter(|id| !tab.is_folder(id))
-        .and_then(|id| tab.path_of(&id))
-        .map(|p| Item::of(p, false, None));
+        .and_then(|id| tab.path_of(&id));
+    let file = file_path.clone().map(|p| Item::of(p, false, None));
     if file.is_some() && tab.extras.columns.preview.is_none() {
         tab.extras.columns.preview = Some(cx.new(Preview::new));
     }
@@ -341,21 +351,26 @@ pub fn render(tab: &mut Tab, width: f32, cx: &mut Context<Tab>) -> AnyElement {
         preview.update(cx, |p, cx| p.show(file.clone(), cx));
     }
 
-    let separator = cx.theme().separator;
-    let trailing = if file.is_some() {
-        PREVIEW_MIN
-    } else if tab.extras.columns.child.is_some() {
-        COLUMN_W
-    } else {
-        0.
-    };
-    let room = ((width - trailing) / COLUMN_W).floor().max(1.) as usize;
-    let levels = &tab.extras.columns.levels;
-    let skip = (levels.len() + 1).saturating_sub(room);
+    let shown = (
+        tab.location().dir().map(Path::to_path_buf).unwrap_or_default(),
+        tab.extras.columns.child.as_ref().map(|c| c.dir.to_path_buf()),
+        file_path,
+    );
+    if tab.extras.columns.shown.as_ref() != Some(&shown) {
+        let end = match &shown {
+            (_, _, Some(_)) => PREVIEW_ID.to_owned(),
+            (_, Some(_), _) => format!("{NEXT}-box"),
+            _ => format!("{CURRENT}-box"),
+        };
+        reveal(tab, end);
+        tab.extras.columns.shown = Some(shown);
+    }
 
-    let column = |content: AnyElement| {
+    let separator = cx.theme().separator;
+    let column = |id: &str, content: AnyElement| {
         div()
-            .flex_none()
+            .id(format!("{id}-box"))
+            .flex_shrink_0()
             .w(px(COLUMN_W))
             .h_full()
             .border_r_1()
@@ -363,21 +378,19 @@ pub fn render(tab: &mut Tab, width: f32, cx: &mut Context<Tab>) -> AnyElement {
             .child(content)
             .into_any_element()
     };
-    let level_list = |level: &Level, id: String, me: WeakEntity<Tab>, cx: &Context<Tab>| {
+    let level_list = |level: &Level, id: &str, me: WeakEntity<Tab>, cx: &Context<Tab>| {
         let dir = level.dir.clone();
         let render = cx.processor(Tab::column_row);
         let (sel, act) = (me.clone(), me);
         let at = dir.clone();
         let dir_of_act = dir.clone();
-        list(id, &level.list, move |key, w, cx| render((dir.clone(), key), w, cx))
+        list(id.to_owned(), &level.list, move |key, w, cx| render((dir.clone(), key), w, cx))
             .selection(Selection::single())
             .on_select(move |e: &SelectEvent<EntryId>, window, cx| {
                 let to = at.to_path_buf();
                 let key = e.key;
-                let _ = sel.update(cx, |t, cx| {
-                    t.retarget(Location::Dir(to), Some(key), cx);
-                    window.focus(crate::tab::VIEW_ID);
-                });
+                let _ = sel.update(cx, |t, cx| t.retarget(Location::Dir(to), Some(key), cx));
+                window.focus(CURRENT);
             })
             .on_activate(move |e: &ActivateEvent<EntryId>, window, cx| {
                 let key = e.key;
@@ -394,29 +407,49 @@ pub fn render(tab: &mut Tab, width: f32, cx: &mut Context<Tab>) -> AnyElement {
     };
 
     let mut row_items: Vec<AnyElement> = Vec::new();
-    for (i, level) in tab.extras.columns.levels.iter().enumerate().skip(skip) {
-        row_items.push(column(level_list(level, format!("column-{i}"), me.clone(), cx)));
+    for (i, level) in tab.extras.columns.levels.iter().enumerate() {
+        let id = format!("column-{i}");
+        row_items.push(column(&id, level_list(level, &id, me.clone(), cx)));
     }
     let current = list(CURRENT, &tab.extras.columns.current, cx.processor(Tab::current_row));
     let current = tab.file_list(current, &tab.extras.columns.current, cx).into_any_element();
-    row_items.push(column(current));
+    row_items.push(column(CURRENT, current));
     if let Some(child) = &tab.extras.columns.child {
-        row_items.push(column(level_list(child, "column-next".to_owned(), me.clone(), cx)));
+        row_items.push(column(NEXT, level_list(child, NEXT, me.clone(), cx)));
     }
     if file.is_some()
         && let Some(preview) = &tab.extras.columns.preview
     {
         row_items.push(
             div()
-                .id("column-preview")
+                .id(PREVIEW_ID)
                 .flex_1()
+                .flex_shrink_0()
                 .min_w(px(PREVIEW_MIN))
                 .h_full()
                 .child(preview.clone())
                 .into_any_element(),
         );
     }
-    h_flex().id("columns").size_full().children(row_items).into_any_element()
+    h_flex()
+        .id("columns")
+        .when(tab.renaming().is_none(), |d| d.key_context(COLUMNS))
+        .size_full()
+        // nd-allow(scroll-list): one column per folder from the start folder down, a handful
+        .overflow_x_scroll()
+        .children(row_items)
+        .into_any_element()
+}
+
+/// Scrolls the column row to `id` once the frame being built has laid it out.
+fn reveal(tab: &Tab, id: String) {
+    let Some(window) = tab.window_id() else { return };
+    if !crate::pump::live() {
+        return;
+    }
+    nd::system::spawn(async {}, move |_, cx| {
+        cx.scroll_into_view(window, &id);
+    });
 }
 
 impl Tab {

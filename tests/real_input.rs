@@ -1,7 +1,8 @@
 //! Tier 3: the real app in a private headless Hyprland on the demo fixture, driven by a virtual
 //! pointer and keyboard the compositor treats as hardware: click, rubber band, a drag onto a
-//! folder, rename, copy and paste, trash and undo, Quick Look, search and Escape. Each step is
-//! read back off the window's semantic tree or the fixture on disk.
+//! folder, rename, copy and paste, trash and undo, Quick Look, search and Escape, then middle
+//! clicks and drags with a modifier held. Each step is read back off the window's semantic tree
+//! or the fixture on disk.
 //!
 //! It opens real windows, so it runs only under nextest or with `ND_REAL=1`.
 #![cfg(target_os = "linux")]
@@ -124,14 +125,49 @@ impl Rig {
     fn has_file(&self, rel: &str) -> bool {
         self.root.join(rel).exists()
     }
+
+    fn tabs_shown(&self) -> bool {
+        self.app.get_by_test_id("tabs").count().unwrap_or(0) > 0
+    }
+
+    /// Drags the row `from` onto the row `onto`, `mods` pressed once the drag is under way as a
+    /// hand does: a Ctrl press on a row toggles its selection instead of starting a drag.
+    fn drag_holding(&mut self, from: &str, onto: &str, mods: &[Modifier]) {
+        let (from, onto) = (self.row(from), self.row(onto));
+        self.click(from);
+        // Past the double-click interval, so the press that starts the drag is a press of its own.
+        settle(600);
+        let steps = 16;
+        let at = |i: u32| {
+            let t = f64::from(i) / f64::from(steps);
+            (from.0 + (onto.0 - from.0) * t, from.1 + (onto.1 - from.1) * t)
+        };
+        // `hold(&[])` holds nothing new and waits for the compositor to take what came before.
+        self.input.move_to(from.0, from.1);
+        self.input.hold(&[]).unwrap();
+        settle(50);
+        self.input.button(true);
+        self.input.hold(&[]).unwrap();
+        settle(100);
+        for i in 1..=steps {
+            if i == steps / 2 {
+                self.input.hold(mods).unwrap();
+            }
+            let (x, y) = at(i);
+            self.input.move_to(x, y);
+            settle(16);
+        }
+        self.input.hold(&[]).unwrap();
+        self.input.button(false);
+        self.input.release().unwrap();
+        settle(250);
+    }
 }
 
 fn settle(ms: u64) {
     std::thread::sleep(Duration::from_millis(ms));
 }
 
-// nd: VirtualInput has no middle button and no modifier held across a click or a drag, so
-// Shift-click, middle-click and a Ctrl or Shift drag are tier 1 tests on the events nd emits.
 #[test]
 fn real_input_on_the_demo_fixture() {
     if !real_allowed() {
@@ -228,4 +264,46 @@ fn real_input_on_the_demo_fixture() {
     rig.eventually("the status counts results", |r| r.status().starts_with("3 results"));
     rig.key(key::ESC, &[]);
     expect(&rig.app.get_by_test_id("files-table")).to_be_visible().unwrap();
+}
+
+#[test]
+fn real_middle_clicks_and_modifier_drags() {
+    if !real_allowed() {
+        println!("skipped: opens a real window; run with ND_REAL=1");
+        return;
+    }
+    let mut rig = Rig::start();
+    // The listing has the keys from launch, with nothing clicked yet.
+    rig.key(key::DOWN, &[]);
+    rig.eventually("Down selects the first row", |r| r.status().contains("1 selected"));
+
+    // Shift held over a second click selects the range between the two.
+    let desktop = rig.row("Desktop");
+    rig.click(desktop);
+    let logs = rig.row("Logs");
+    rig.input.hold(&[Modifier::Shift]).unwrap();
+    rig.click(logs);
+    rig.input.release().unwrap();
+    rig.eventually("Shift-click selects the range", |r| r.status().contains("4 selected"));
+
+    // A middle click on a folder opens it in a tab behind this one; one on that tab closes it.
+    assert!(!rig.tabs_shown(), "one tab shows no strip");
+    let projects = rig.row("Projects");
+    rig.input.middle_click(projects.0, projects.1).unwrap();
+    rig.eventually("the middle click opens a tab", |r| r.tabs_shown());
+    rig.eventually("the strip is laid out", |r| r.app.get_by_test_id("tabs").bounding_box().is_ok_and(|b| b.is_some()));
+    let strip = rig.app.get_by_test_id("tabs").bounding_box().unwrap().unwrap();
+    let tab = (strip.width - 44.) / 2.;
+    let second = (rig.origin.0 + f64::from(strip.x + tab * 1.5), rig.origin.1 + f64::from(strip.y + strip.height / 2.));
+    rig.input.middle_click(second.0, second.1).unwrap();
+    rig.eventually("a middle click on the tab closes it", |r| !r.tabs_shown());
+    // A press while the window still moves from two tabs to one starts no drag.
+    settle(1000);
+    assert!(rig.status().starts_with("10 items"), "the first tab still shows Home: {}", rig.status());
+
+    // Ctrl forces a copy where one file system would move; Shift forces the move.
+    rig.drag_holding("todo.txt", "Projects", &[Modifier::Control]);
+    rig.eventually("the Ctrl drop copies", |r| r.has_file("Projects/todo.txt") && r.has_file("todo.txt"));
+    rig.drag_holding("Notes.md", "Projects", &[Modifier::Shift]);
+    rig.eventually("the Shift drop moves", |r| r.has_file("Projects/Notes.md") && !r.has_file("Notes.md"));
 }

@@ -1,4 +1,4 @@
-//! The context menus: on files, on a folder's empty space, on the sidebar and on the tab strip.
+//! The context menus: on files, on a folder's empty space, on a sidebar row and on a tab.
 //! Every item is an action, so a menu item, its key and its toolbar button never disagree; the
 //! items act on the selection, which a right click on an unselected row moves to that row first.
 
@@ -8,6 +8,7 @@ use nd::prelude::*;
 use trove_fs::SortKey;
 
 use crate::actions::*;
+use crate::location::Location;
 use crate::tab::View;
 
 /// What a menu on files acts on, read from the tab when the menu opens.
@@ -120,7 +121,7 @@ pub fn folder(menu: ContextMenu, h: &Here) -> ContextMenu {
     menu.entry(MenuItem::action("Show hidden files", ToggleHidden).checked(h.show_hidden)).submenu(sort).submenu(view)
 }
 
-/// What the sidebar's menu acts on: the row the active tab shows.
+/// What a sidebar row's menu acts on.
 #[derive(Clone, Debug)]
 pub enum Place {
     Folder { path: PathBuf, bookmark: bool },
@@ -129,33 +130,30 @@ pub enum Place {
     Recent,
 }
 
-pub fn sidebar(menu: ContextMenu, place: Option<&Place>) -> ContextMenu {
-    let mut menu = menu;
+pub fn sidebar(menu: ContextMenu, place: &Place) -> ContextMenu {
     match place {
-        Some(Place::Folder { path, bookmark }) => {
-            menu = menu.item("Open in new tab", OpenPlaceInNewTab(path.clone()));
+        Place::Folder { path, bookmark } => {
+            let menu = menu.item("Open in new tab", OpenPlaceInNewTab(Location::Dir(path.clone()))).separator();
             if *bookmark {
-                menu = menu.separator().item("Remove from bookmarks", RemoveBookmark(path.clone()));
+                menu.item("Remove from bookmarks", RemoveBookmark(path.clone()))
+            } else {
+                menu.item("Add to bookmarks", BookmarkPlace(path.clone()))
             }
         }
-        Some(Place::Volume { mount, ejectable }) => {
-            menu = menu.item("Open in new tab", OpenPlaceInNewTab(mount.clone()));
-            if *ejectable {
-                menu = menu.separator().item("Eject", Eject(mount.clone()));
-            }
+        Place::Volume { mount, ejectable } => {
+            let menu = menu.item("Open in new tab", OpenPlaceInNewTab(Location::Dir(mount.clone())));
+            if *ejectable { menu.separator().item("Eject", Eject(mount.clone())) } else { menu }
         }
-        Some(Place::Trash) => {
-            menu = menu.item_destructive("Empty Trash", EmptyTrash);
-        }
-        Some(Place::Recent) | None => {}
+        Place::Trash => menu
+            .item("Open in new tab", OpenPlaceInNewTab(Location::Dir(crate::env::get().trash.clone())))
+            .separator()
+            .item_destructive("Empty Trash", EmptyTrash),
+        Place::Recent => menu.item("Open in new tab", OpenPlaceInNewTab(Location::Recent)),
     }
-    if !matches!(place, Some(Place::Trash)) {
-        menu = menu.separator().item_destructive("Empty Trash", EmptyTrash);
-    }
-    menu
 }
 
-pub fn tabs(menu: ContextMenu, count: usize) -> ContextMenu {
-    let menu = menu.item("Duplicate tab", DuplicateTab).separator().item("Close tab", CloseTab);
-    if count > 1 { menu.item("Close other tabs", CloseOtherTabs) } else { menu }
+/// The menu on the tab with id `tab`.
+pub fn tab(menu: ContextMenu, tab: u64, count: usize) -> ContextMenu {
+    let menu = menu.item("Duplicate tab", DuplicateTab(tab)).separator().item("Close tab", CloseTabWithId(tab));
+    if count > 1 { menu.item("Close other tabs", CloseOtherTabs(tab)) } else { menu }
 }

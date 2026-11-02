@@ -11,7 +11,7 @@ use std::time::Duration;
 use nd::prelude::*;
 use trove_fs::{Place, PlaceIcon, Usage, Volume, VolumeKind};
 
-use crate::actions::{DRAG_FILES, DropOnto};
+use crate::actions::{DRAG_FILES, DropOnto, OpenPlaceInNewTab};
 use crate::env::is_device;
 use crate::fileops::Transfer;
 use crate::format;
@@ -172,19 +172,20 @@ impl Sidebar {
         self.eject(&volume_id(mount), cx);
     }
 
-    /// What the menu acts on: the row the active tab shows.
-    fn menu_place(&self) -> Option<menus::Place> {
+    /// What the menu of the row `id` acts on.
+    fn menu_place(&self, id: &str) -> Option<menus::Place> {
         let env = crate::env::get();
-        match self.current.as_ref()? {
+        match self.location_of(id)? {
             Location::Recent => Some(menus::Place::Recent),
-            Location::Dir(p) if *p == env.trash => Some(menus::Place::Trash),
+            Location::Dir(p) if p == env.trash => Some(menus::Place::Trash),
             Location::Dir(p) => {
-                if let Some(v) = self.volumes.iter().find(|v| v.mount_point == *p) {
-                    return Some(menus::Place::Volume { mount: p.clone(), ejectable: ejectable(v.kind) });
+                if id.starts_with("volume:")
+                    && let Some(v) = self.volumes.iter().find(|v| v.mount_point == p)
+                {
+                    return Some(menus::Place::Volume { mount: p, ejectable: ejectable(v.kind) });
                 }
-                let bookmark = self.bookmarks.iter().any(|b| b.path == *p);
-                let place = bookmark || self.places.iter().any(|pl| pl.path == *p);
-                place.then(|| menus::Place::Folder { path: p.clone(), bookmark })
+                let bookmark = id.starts_with("place:") && self.bookmarks.iter().any(|b| b.path == p);
+                Some(menus::Place::Folder { path: p, bookmark })
             }
         }
     }
@@ -265,18 +266,15 @@ impl Sidebar {
                 let mut node = source_node(volume_id(&v.mount_point), volume_label(v))
                     .icon(icons::for_volume(v.kind))
                     .parent(section);
+                let usage = self.usage.get(&v.mount_point).filter(|u| u.total > 0);
+                if let Some(u) = usage {
+                    let used = u.total.saturating_sub(u.free) as f64 / u.total as f64;
+                    node = node.caption(format!("{} free", format::size(u.free))).meter(used as f32);
+                }
                 if let Some(why) = self.eject_errors.get(&v.mount_point) {
                     node = node.caption(why.clone());
-                } else if let Some(u) = self.usage.get(&v.mount_point).filter(|u| u.total > 0) {
-                    // nd: source rows share one fixed pitch, so a caption over a meter runs
-                    // into the next row; the free space sits beside the name instead. The
-                    // meter spans what the badge and the actions leave, so every device row
-                    // gets a badge of the same width (figure spaces pad it) and no inline
-                    // action; a disk ejects from its context menu.
-                    let used = u.total.saturating_sub(u.free) as f64 / u.total as f64;
-                    node = node.badge(format!("{:\u{2007}>6} free", format::size(u.free))).meter(used as f32);
                 }
-                if ejectable(v.kind) && !wanted {
+                if ejectable(v.kind) {
                     node = node.actions([EJECT]);
                 }
                 nodes.push(node);
@@ -311,9 +309,7 @@ fn volume_label(v: &Volume) -> String {
 impl Render for Sidebar {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let (open, act, drop) = (cx.weak_entity(), cx.weak_entity(), cx.weak_entity());
-        let place = self.menu_place();
-        // nd: source_tree rows take no context menu and no middle click of their own, so the
-        // menu acts on the row the active tab shows and a middle click opens nothing.
+        let (menu, middle) = (cx.weak_entity(), cx.weak_entity());
         let tree = source_tree("places")
             .size_full()
             .nodes(self.nodes())
@@ -323,6 +319,16 @@ impl Render for Sidebar {
                 let found = open.update(cx, |this, _| (this.location_of(&e.id), this.on_open.clone()));
                 if let Some((Some(location), on_open)) = found {
                     on_open(location, window, cx);
+                }
+            })
+            .context_menu(move |id, m, _, cx| match menu.upgrade().and_then(|s| s.read(cx).menu_place(id)) {
+                Some(place) => menus::sidebar(m, &place),
+                None => m,
+            })
+            .on_middle_click(move |e: &nd::components::SourceMiddleClicked, window, cx| {
+                let at = middle.upgrade().and_then(|s| s.read(cx).location_of(&e.id));
+                if let Some(at) = at {
+                    cx.dispatch_action(window.id(), &OpenPlaceInNewTab(at));
                 }
             })
             .on_action(move |e: &SourceActionClicked, _, cx| {
@@ -340,6 +346,5 @@ impl Render for Sidebar {
             .size_full()
             .on_navigate(|e: &NavigateEvent, window, cx| crate::root::history(e, window, cx))
             .child(tree)
-            .context_menu(move |menu, _, _| menus::sidebar(menu, place.as_ref()))
     }
 }

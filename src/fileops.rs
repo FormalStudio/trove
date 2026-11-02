@@ -67,6 +67,10 @@ pub fn register(root: Scaffold, cx: &mut Context<Root>) -> Scaffold {
                 r.sidebar().clone().update(cx, |s, cx| s.add_bookmark(path, cx));
             }
         }))
+        .on_action(cx.listener(|r, BookmarkPlace(path): &BookmarkPlace, _, cx| {
+            let path = path.clone();
+            r.sidebar().clone().update(cx, |s, cx| s.add_bookmark(path, cx));
+        }))
         .on_action(cx.listener(|r, RemoveBookmark(path): &RemoveBookmark, _, cx| {
             let path = path.clone();
             r.sidebar().clone().update(cx, |s, cx| s.remove_bookmark(&path, cx));

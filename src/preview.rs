@@ -238,6 +238,8 @@ pub struct Preview {
     text: Entity<TextView>,
     sound: Entity<Sound>,
     visible: bool,
+    /// The pane's width, which the user drags.
+    width: f32,
     _watch: Option<Subscription>,
     _sound: Subscription,
 }
@@ -259,6 +261,7 @@ impl Preview {
             text: cx.new(TextView::new),
             sound,
             visible: true,
+            width: PANE_W,
             _watch: None,
             _sound: watch,
         }
@@ -269,6 +272,13 @@ impl Preview {
         self.tab = Some(tab.downgrade());
         self.subject = None;
         self.follow(tab, cx);
+    }
+
+    pub fn set_width(&mut self, width: f32, cx: &mut Context<Self>) {
+        if (self.width - width).abs() >= 0.5 {
+            self.width = width;
+            cx.notify();
+        }
     }
 
     /// The pane only loads while it shows.
@@ -419,7 +429,7 @@ impl Render for Preview {
             }
             Subject::One(item) => {
                 let sound = self.sound.read(cx).state_of(&item.path);
-                let art = art(item, &self.loaded, &self.text, sound, Scale::Pane, cx);
+                let art = art(item, &self.loaded, &self.text, sound, Scale::Pane(self.width), cx);
                 v_flex()
                     .items_center()
                     .gap(theme.spacing.sm)
@@ -438,21 +448,19 @@ impl Render for Preview {
 /// The pane's picture box height.
 pub const PANE_ART: f32 = 190.;
 
-/// The inspector's width, which nd does not let the user change.
+/// The pane's width until the user drags it.
 pub const PANE_W: f32 = 260.;
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum Scale {
-    Pane,
+    /// The preview pane, this wide.
+    Pane(f32),
     /// Quick Look, with the room its body has.
-    Large {
-        width: f32,
-        height: f32,
-    },
+    Large { width: f32, height: f32 },
 }
 
-/// The size `natural` is drawn at inside `room`: whole, never enlarged.
-// nd: ImageFit::Contain still fills the box on GPUI, so the box takes the picture's shape.
+/// The size `natural` is drawn at inside `room`: whole, and never enlarged, as Finder leaves a
+/// small picture at its own size where `contain` would scale it up to the box.
 fn fitted(natural: (u32, u32), room: (f32, f32)) -> (f32, f32) {
     let (w, h) = (natural.0 as f32, natural.1 as f32);
     let s = (room.0 / w).min(room.1 / h).min(1.);
@@ -494,7 +502,7 @@ pub fn art(
     let large = matches!(scale, Scale::Large { .. });
     let height = px(if large { 0. } else { PANE_ART });
     let room = match scale {
-        Scale::Pane => (PANE_W - 2. * f32::from(theme.spacing.lg), PANE_ART),
+        Scale::Pane(width) => (width - 2. * f32::from(theme.spacing.lg), PANE_ART),
         Scale::Large { width, height } => (width, height),
     };
     let natural = loaded.info.as_ref().and_then(|i| i.dimensions);
