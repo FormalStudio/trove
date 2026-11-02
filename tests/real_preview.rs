@@ -97,7 +97,7 @@ impl Rig {
             options = options.env(key, value);
         }
         let app = launch_app(options).unwrap();
-        expect(&app.get_by_test_id("files-table")).to_be_visible().unwrap();
+        expect(&app.get_by_test_id("files")).to_be_visible().unwrap();
         std::thread::sleep(Duration::from_millis(600));
         app
     }
@@ -127,42 +127,41 @@ fn real_previews_quick_look_thumbnails_search_and_columns() {
     let rig = Rig::start();
     for scheme in ["light", "dark"] {
         let app = rig.launch(scheme, "Gallery");
-        let files = app.get_by_test_id("files");
-        files.press("down ctrl-i").unwrap();
+        app.keyboard().press("down ctrl-i").unwrap();
         settle(900);
         rig.grab(&app, &format!("pane-image-{scheme}"));
 
-        files.press("space").unwrap();
+        app.keyboard().press("space").unwrap();
         expect(&app.get_by_test_id("quicklook")).to_be_visible().unwrap();
         settle(900);
         rig.grab(&app, &format!("quicklook-{scheme}"));
         app.get_by_test_id("quicklook").press("escape").unwrap();
         settle(300);
 
-        files.press("ctrl-i ctrl-2").unwrap();
+        app.keyboard().press("ctrl-i ctrl-2").unwrap();
         expect(&app.get_by_test_id("files-grid")).to_be_visible().unwrap();
         settle(1500);
         rig.grab(&app, &format!("grid-thumbnails-{scheme}"));
 
-        files.press("ctrl-3 down").unwrap();
+        app.keyboard().press("ctrl-3").unwrap();
+        expect(&app.get_by_test_id("files-columns")).to_be_visible().unwrap();
+        app.keyboard().press("down").unwrap();
         expect(&app.get_by_test_id("files-columns")).to_be_visible().unwrap();
         settle(900);
         rig.grab(&app, &format!("columns-{scheme}"));
         drop(app);
 
         let app = rig.launch(scheme, "Documents");
-        let files = app.get_by_test_id("files");
-        files.press("r o ctrl-i").unwrap();
+        app.keyboard().press("r o ctrl-i").unwrap();
         settle(900);
         rig.grab(&app, &format!("pane-text-{scheme}"));
-        files.press("t a").unwrap();
+        app.keyboard().press("t a").unwrap();
         settle(900);
         rig.grab(&app, &format!("pane-folder-{scheme}"));
         drop(app);
 
         let app = rig.launch(scheme, "");
-        let files = app.get_by_test_id("files");
-        files.press("ctrl-i ctrl-f").unwrap();
+        app.keyboard().press("ctrl-i ctrl-f").unwrap();
         app.get_by_test_id("search").type_text("chap").unwrap();
         expect(&app.get_by_test_id("results-table")).to_be_visible().unwrap();
         settle(700);
@@ -171,4 +170,43 @@ fn real_previews_quick_look_thumbnails_search_and_columns() {
         rig.grab(&app, &format!("results-{scheme}"));
         drop(app);
     }
+}
+
+/// The states with nothing to list, and a window holding several tabs.
+#[test]
+fn real_empty_states_and_tabs() {
+    if !real_allowed() {
+        println!("skipped: opens a real window; run with ND_REAL=1");
+        return;
+    }
+    let rig = Rig::start();
+    std::fs::create_dir_all(rig.root.join("Empty")).unwrap();
+    let locked = rig.root.join("Locked");
+    std::fs::create_dir_all(&locked).unwrap();
+    std::fs::set_permissions(&locked, std::os::unix::fs::PermissionsExt::from_mode(0o000)).unwrap();
+    for scheme in ["light", "dark"] {
+        let app = rig.launch(scheme, "Empty");
+        rig.grab(&app, &format!("empty-{scheme}"));
+        drop(app);
+
+        let app = rig.launch(scheme, "Locked");
+        rig.grab(&app, &format!("denied-{scheme}"));
+        drop(app);
+
+        let app = rig.launch(scheme, "");
+        app.keyboard().press("ctrl-f").unwrap();
+        app.get_by_test_id("search").type_text("zzqx").unwrap();
+        settle(1200);
+        rig.grab(&app, &format!("no-results-{scheme}"));
+        app.keyboard().press("escape").unwrap();
+
+        for keys in ["ctrl-t", "m u", "enter", "ctrl-t", "p r", "enter"] {
+            app.keyboard().press(keys).unwrap();
+            settle(400);
+        }
+        settle(500);
+        rig.grab(&app, &format!("tabs-{scheme}"));
+        drop(app);
+    }
+    std::fs::set_permissions(&locked, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
 }

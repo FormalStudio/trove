@@ -121,7 +121,7 @@ impl Thumbs {
         if let Some(remote) = self.remote.get(dir) {
             return !remote;
         }
-        let volumes = self.volumes.get_or_insert_with(trove_fs::volumes);
+        let volumes = self.volumes.get_or_insert_with(crate::env::volumes);
         let remote = trove_fs::is_network_path(dir, volumes);
         self.remote.insert(dir.to_path_buf(), remote);
         !remote

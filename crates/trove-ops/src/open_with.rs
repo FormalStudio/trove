@@ -8,7 +8,7 @@ use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 
 pub use crate::desktop::{AppInfo, Env, Registry};
-use crate::desktop::{expand_exec, in_terminal, set_default_text};
+use crate::desktop::{Launch, expand_exec, in_terminal, set_default_text};
 use crate::job::io_message;
 
 const SNIFF_BYTES: usize = 8192;
@@ -107,14 +107,14 @@ pub(crate) fn set_default_in(env: &Env, app: &AppInfo, mime: &str) -> io::Result
     fs::rename(&tmp, &path)
 }
 
-type Launcher<'a> = &'a dyn Fn(&[String]) -> Result<(), String>;
+type Launcher<'a> = &'a dyn Fn(&Launch) -> Result<(), String>;
 
 fn launch_app(env: &Env, app: &AppInfo, paths: &[PathBuf], launch: Launcher<'_>) -> Result<(), String> {
-    for mut argv in expand_exec(app, paths)? {
+    for mut cmd in expand_exec(app, paths)? {
         if app.terminal {
-            argv = in_terminal(env, argv)?;
+            cmd.argv = in_terminal(env, cmd.argv)?;
         }
-        launch(&argv)?;
+        launch(&cmd)?;
     }
     Ok(())
 }
@@ -162,19 +162,19 @@ fn fallback_open(env: &Env, files: &[PathBuf], launch: Launcher<'_>) -> Result<(
     for file in files {
         let mut argv: Vec<String> = base.iter().map(|s| (*s).to_owned()).collect();
         argv.push(file.to_string_lossy().into_owned());
-        launch(&argv)?;
+        launch(&Launch { argv, env: Vec::new() })?;
     }
     Ok(())
 }
 
 /// Starts `argv` in a session of its own with no stdio, so closing Trove never takes the app
 /// with it.
-fn spawn_detached(argv: &[String]) -> Result<(), String> {
-    let Some((program, args)) = argv.split_first() else {
+fn spawn_detached(launch: &Launch) -> Result<(), String> {
+    let Some((program, args)) = launch.argv.split_first() else {
         return Err("Empty command".into());
     };
     let mut cmd = Command::new(program);
-    cmd.args(args).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+    cmd.args(args).envs(launch.env.iter().cloned()).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
     // SAFETY: setsid is async-signal-safe and the closure touches nothing else.
     unsafe {
         cmd.pre_exec(|| {

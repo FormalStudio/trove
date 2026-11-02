@@ -52,18 +52,16 @@ fn real_light_and_dark_list_and_grid() {
         std::thread::sleep(Duration::from_millis(800));
         grab(&compositor, app.pid(), &dir.join(format!("list-{scheme}.png")));
 
-        app.get_by_test_id("files").press("down down ctrl-i").unwrap();
+        app.keyboard().press("down down ctrl-i").unwrap();
         std::thread::sleep(Duration::from_millis(600));
         grab(&compositor, app.pid(), &dir.join(format!("preview-{scheme}.png")));
 
-        app.get_by_test_id("files").press("ctrl-i enter").unwrap();
-        app.get_by_test_id("files").press("ctrl-f").unwrap();
+        app.keyboard().press("ctrl-i enter ctrl-f").unwrap();
         app.get_by_test_id("search").type_text("chap").unwrap();
         std::thread::sleep(Duration::from_millis(600));
         grab(&compositor, app.pid(), &dir.join(format!("search-{scheme}.png")));
 
-        app.get_by_test_id("files").press("ctrl-t").unwrap();
-        app.get_by_test_id("view-grid").click().unwrap();
+        app.keyboard().press("escape ctrl-t ctrl-2").unwrap();
         expect(&app.get_by_test_id("files-grid")).to_be_visible().unwrap();
         std::thread::sleep(Duration::from_millis(800));
         grab(&compositor, app.pid(), &dir.join(format!("grid-{scheme}.png")));
@@ -107,8 +105,8 @@ fn real_file_operations() {
             options = options.env(*key, value.clone());
         }
         let app = launch_app(options).unwrap();
-        let files = app.get_by_test_id("files");
-        expect(&app.get_by_test_id("files-table")).to_be_visible().unwrap();
+        let files = app.get_by_test_id("files-table");
+        expect(&files).to_be_visible().unwrap();
         std::thread::sleep(Duration::from_millis(600));
 
         let row = |name: &str| app.get_by_test_id("cell-0").filter_has_text(name).first();
@@ -124,25 +122,25 @@ fn real_file_operations() {
         row("todo.txt").right_click().unwrap();
         std::thread::sleep(Duration::from_millis(600));
         grab(&dir.join(format!("menu-{scheme}.png")));
-        files.press("escape").unwrap();
+        app.keyboard().press("escape").unwrap();
 
         click("todo.txt");
-        files.press("f2").unwrap();
+        app.keyboard().press("f2").unwrap();
         std::thread::sleep(Duration::from_millis(500));
         grab(&dir.join(format!("rename-{scheme}.png")));
         app.get_by_test_id("rename").press("escape").unwrap();
 
         click("Bulk");
-        files.press("ctrl-c ctrl-v").unwrap();
+        app.keyboard().press("ctrl-c ctrl-v").unwrap();
         expect(&app.get_by_test_id("job-1")).to_be_visible().unwrap();
         grab(&dir.join(format!("copy-job-{scheme}.png")));
 
         click("Notes.md");
-        files.press("ctrl-c").unwrap();
+        app.keyboard().press("ctrl-c").unwrap();
         let (x, y) = centre("Documents");
         app.mouse().double_click(x, y).unwrap();
         std::thread::sleep(Duration::from_millis(400));
-        files.press("ctrl-v").unwrap();
+        app.keyboard().press("ctrl-v").unwrap();
         std::thread::sleep(Duration::from_millis(900));
         grab(&dir.join(format!("conflict-{scheme}.png")));
         app.get_by_test_id("conflict-cancel").click().unwrap();

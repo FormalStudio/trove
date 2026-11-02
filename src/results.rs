@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
 use nd::prelude::*;
+use nd::virtual_list::{RowDropped, SelectionChanged};
 use trove_fs::{EntryId, FileKind};
 use trove_search::{Hit, IndexState, Query, SearchEvent, SearchRun};
 
@@ -19,6 +20,8 @@ use crate::tab::Tab;
 
 /// The fewest characters a recursive search starts at; one character only filters the folder.
 pub const MIN_CHARS: usize = 2;
+/// The results' table, which takes the keys while it shows.
+pub const TABLE: &str = "results-table";
 const LIMIT: usize = 500;
 /// Rows whose modification time is looked up for each answer: the first screenfuls.
 const STAT_ROWS: usize = 400;
@@ -73,7 +76,6 @@ pub struct Results {
     /// The folder's selection and cursor from before the search, put back when it ends.
     saved: Option<(Vec<EntryId>, Option<EntryId>)>,
     cursor: Option<EntryId>,
-    anchor: Option<EntryId>,
     hint: bool,
     typed: String,
     typed_at: f64,
@@ -95,7 +97,6 @@ impl Results {
             done: None,
             saved: None,
             cursor: None,
-            anchor: None,
             hint: false,
             typed: String::new(),
             typed_at: f64::NEG_INFINITY,
@@ -138,6 +139,18 @@ impl Results {
         self.rows.len()
     }
 
+    /// "3 results", or "1,000+ results" once the search stopped at its limit.
+    pub fn count_label(&self) -> String {
+        let n = self.rows.len();
+        if self.done.is_some_and(|d| d.truncated) || n >= LIMIT {
+            format!("{}+ results", format::group(n))
+        } else if n == 1 {
+            "1 result".to_owned()
+        } else {
+            format!("{} results", format::group(n))
+        }
+    }
+
     pub fn is_empty(&self) -> bool {
         self.rows.is_empty()
     }
@@ -170,43 +183,32 @@ impl Results {
 
     fn select_only(&mut self, id: EntryId, cx: &mut App) {
         self.cursor = Some(id);
-        self.anchor = Some(id);
         self.list.set_selected(vec![id], cx);
         self.list.scroll_to(id, Align::Nearest, px(0.), cx);
     }
 
-    pub fn move_cursor(&mut self, step: isize, extend: bool, cx: &mut App) {
-        if self.rows.is_empty() {
-            return;
-        }
-        let last = self.rows.len() as isize - 1;
-        let at = self.cursor.and_then(|c| self.rows.iter().position(|id| *id == c));
-        let next = match at {
-            Some(i) => (i as isize + step).clamp(0, last),
-            None if step < 0 => last,
-            None => 0,
-        } as usize;
-        let id = self.rows[next];
-        if !extend {
-            self.select_only(id, cx);
-            return;
-        }
-        let anchor = self.anchor.and_then(|a| self.rows.iter().position(|v| *v == a)).unwrap_or(next);
-        let (lo, hi) = (anchor.min(next), anchor.max(next));
-        self.cursor = Some(id);
-        self.list.set_selected(self.rows[lo..=hi].to_vec(), cx);
-        self.list.scroll_to(id, Align::Nearest, px(0.), cx);
-    }
-
-    pub fn move_to_end(&mut self, end: bool, cx: &mut App) {
-        let id = if end { self.rows.last() } else { self.rows.first() };
-        if let Some(id) = id.copied() {
+    /// Quick Look's arrows over the results.
+    pub fn select_step(&mut self, by: isize, cx: &mut App) {
+        if let Some(id) = crate::tab::step_in(&self.rows, self.cursor, by) {
             self.select_only(id, cx);
         }
     }
 
-    pub fn select_all(&mut self, cx: &mut App) {
-        self.list.set_selected(self.rows.clone(), cx);
+    pub fn move_selection(&mut self, to: crate::tab::Move, cx: &mut App) {
+        let selected = self.selected();
+        let Some((keys, cursor)) = crate::tab::moved(&self.rows, &selected, self.cursor, to) else { return };
+        self.cursor = cursor;
+        self.list.set_selected(keys, cx);
+        if let Some(at) = cursor {
+            self.list.scroll_to(at, Align::Nearest, px(0.), cx);
+        }
+    }
+
+    /// Down in the search field: the best result, selected.
+    pub fn select_first(&mut self, cx: &mut App) {
+        if let Some(id) = self.rows.first().copied() {
+            self.select_only(id, cx);
+        }
     }
 
     pub fn type_select(&mut self, c: char, now: f64, cx: &mut App) {
@@ -223,11 +225,8 @@ impl Results {
         }
     }
 
-    fn on_select(&mut self, e: &SelectEvent<EntryId>) {
-        self.cursor = Some(e.key);
-        if e.keys.len() <= 1 {
-            self.anchor = Some(e.key);
-        }
+    fn on_selection_change(&mut self, e: &SelectionChanged<EntryId>) {
+        self.cursor = e.cursor.or_else(|| e.keys.last().copied());
     }
 
     fn stop(&mut self) {
@@ -450,7 +449,6 @@ fn start(tab: &mut Tab, query: String, cx: &mut Context<Tab>) {
     if !r.shown {
         r.shown = true;
         r.cursor = None;
-        r.anchor = None;
         let home = crate::env::get().home.clone();
         let hits = seed.into_iter().map(|(path, is_dir, name_matches)| Hit { path, is_dir, score: 0, name_matches });
         let unknown = r.set_hits(hits.collect(), &home);
@@ -578,11 +576,12 @@ impl Tab {
             2 => quiet(row.kind.label().to_owned()),
             _ => quiet(row.modified.map(|t| self.today().modified(t)).unwrap_or_default()),
         };
-        h_flex().h(px(crate::tab::ROW_HEIGHT)).px(theme.spacing.sm).items_center().child(content).into_any_element()
+        let row = h_flex().h(px(crate::tab::ROW_HEIGHT)).px(theme.spacing.sm).items_center().child(content);
+        self.file_events(row, id, cx).into_any_element()
     }
 }
 
-/// The results in place of the listing: the scope switch, a quiet state line, the table.
+/// The results in place of the listing: the scope switch and a quiet state line over the table.
 pub fn render(tab: &mut Tab, width: f32, cx: &mut Context<Tab>) -> AnyElement {
     let index = crate::search::get(cx).index_state();
     let theme = cx.theme();
@@ -594,13 +593,6 @@ pub fn render(tab: &mut Tab, width: f32, cx: &mut Context<Tab>) -> AnyElement {
     };
     let r = &tab.extras.results;
     let scope = r.scope;
-    let count = if r.done.is_some_and(|d| d.truncated) || r.rows.len() >= LIMIT {
-        format!("{}+ results", format::group(r.rows.len()))
-    } else if r.rows.len() == 1 {
-        "1 result".to_owned()
-    } else {
-        format!("{} results", format::group(r.rows.len()))
-    };
     let scope_dir = scope_dir(tab);
     let state = state_line(&scope_dir, &home, r.done, &index, cx);
 
@@ -649,17 +641,10 @@ pub fn render(tab: &mut Tab, width: f32, cx: &mut Context<Tab>) -> AnyElement {
         .gap(theme.spacing.md)
         .items_center()
         .children(switch)
-        .child(div().flex_1())
-        .child(
-            text(count)
-                .id("results-count")
-                .text_size(theme.type_scale.footnote)
-                .text_color(theme.text.secondary)
-                .tabular_nums(),
-        )
+        .child(div().flex_1().min_w_0().children(state))
         .child(info);
 
-    let (sel, act) = (me.clone(), me.clone());
+    let (sel, act, drop) = (me.clone(), me.clone(), me.clone());
     let cell = cx.processor(Tab::result_cell);
     let query = r.query.clone();
     let empty = if r.done.is_some() {
@@ -671,17 +656,30 @@ pub fn render(tab: &mut Tab, width: f32, cx: &mut Context<Tab>) -> AnyElement {
     } else {
         div().into_any_element()
     };
-    let table = table("results-table", &r.list, columns(width), move |id, col, w, cx| cell((id, col), w, cx))
+    let ids = tab.drag_ids(&r.list);
+    let folders: std::collections::HashSet<EntryId> =
+        r.by_id.iter().filter(|(_, row)| row.is_dir).map(|(id, _)| *id).collect();
+    let table = table(TABLE, &r.list, columns(width), move |id, col, w, cx| cell((id, col), w, cx))
         .selection(Selection::multiple())
         .estimated_row_height(px(crate::tab::ROW_HEIGHT))
-        .on_select(move |e: &SelectEvent<EntryId>, _, cx| {
+        .on_selection_change(move |e: &SelectionChanged<EntryId>, window, cx| {
+            crate::tab::take_keys(window);
             let _ = sel.update(cx, |t, cx| {
-                t.extras.results.on_select(e);
+                t.extras.results.on_selection_change(e);
                 cx.notify();
             });
         })
         .on_activate(move |e: &ActivateEvent<EntryId>, window, cx| {
             let _ = act.update(cx, |t, cx| t.open(e.key, window, cx));
+        })
+        .drag_rows(crate::actions::DRAG_FILES, move |id| ids.get(id).cloned().unwrap_or_default())
+        .accepts_drops([crate::actions::DRAG_FILES, DragItem::FILES])
+        .drop_on(move |id| folders.contains(id))
+        .on_drop(move |e: &RowDropped<EntryId>, window, cx| {
+            let Some(tab) = drop.upgrade() else { return };
+            if let Some(action) = tab.read(cx).drop_on_row(e) {
+                cx.dispatch_action(window.id(), &action);
+            }
         })
         .empty(empty);
     v_flex()
@@ -689,7 +687,6 @@ pub fn render(tab: &mut Tab, width: f32, cx: &mut Context<Tab>) -> AnyElement {
         .key_context(crate::keys::RESULTS)
         .size_full()
         .child(header)
-        .children(state)
         .child(separator())
         .child(div().flex_1().min_h_0().child(table))
         .into_any_element()
@@ -699,7 +696,7 @@ pub fn render(tab: &mut Tab, width: f32, cx: &mut Context<Tab>) -> AnyElement {
 /// folder.
 fn state_line(scope: &Path, home: &Path, done: Option<Done>, index: &IndexState, cx: &App) -> Option<AnyElement> {
     let theme = cx.theme();
-    let remote = trove_fs::is_network_path(scope, &trove_fs::volumes());
+    let remote = trove_fs::is_network_path(scope, &crate::env::volumes());
     let message = if remote {
         Some(if done.is_some_and(|d| d.truncated) {
             "This is a live search of a network folder. It stopped early, so results may be incomplete."
@@ -715,13 +712,10 @@ fn state_line(scope: &Path, home: &Path, done: Option<Done>, index: &IndexState,
     Some(
         h_flex()
             .id("results-state")
-            .w_full()
-            .px(theme.spacing.md)
-            .pb(theme.spacing.sm)
             .gap(theme.spacing.sm)
             .items_center()
             .child(icon(Icon::Info, 12.).text_color(theme.text.secondary))
-            .child(text(message).text_size(theme.type_scale.footnote).text_color(theme.text.secondary))
+            .child(text(message).text_size(theme.type_scale.footnote).text_color(theme.text.secondary).truncate())
             .into_any_element(),
     )
 }

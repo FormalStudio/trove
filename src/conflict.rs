@@ -1,7 +1,7 @@
 //! The sheet a conflict opens: both files with their size and date, Replace (a folder over a
 //! folder merges), Skip, Keep both, Cancel, and "Apply to all" for the rest of the job.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 use nd::prelude::*;
@@ -67,6 +67,15 @@ impl ConflictSheet {
     }
 }
 
+/// `~/Documents/Notes.md` for a path under Home, else the path as it is.
+fn home_relative(path: &Path) -> String {
+    match path.strip_prefix(&crate::env::get().home) {
+        Ok(rest) if rest.as_os_str().is_empty() => "~".to_owned(),
+        Ok(rest) => format!("~/{}", rest.display()),
+        Err(_) => path.display().to_string(),
+    }
+}
+
 impl Render for ConflictSheet {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
@@ -78,12 +87,12 @@ impl Render for ConflictSheet {
             format!("An item named \u{201c}{name}\u{201d} already exists in \u{201c}{folder}\u{201d}")
         };
         let replace = if self.both_folders() { "Merge" } else { "Replace" };
-        let line = |label: &'static str, path: &PathBuf, about: String, id: &'static str| {
+        let line = |label: &'static str, path: &Path, about: String, id: &'static str| {
             v_flex()
                 .id(id)
                 .gap(theme.spacing.xs)
                 .child(text(label).text_size(theme.type_scale.footnote).text_color(theme.text.secondary))
-                .child(text(path.display().to_string()).truncate())
+                .child(text(home_relative(path)).truncate())
                 .child(text(about).text_size(theme.type_scale.footnote).text_color(theme.text.secondary).tabular_nums())
         };
         let me = cx.weak_entity();

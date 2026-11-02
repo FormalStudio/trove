@@ -15,7 +15,6 @@ actions!(
         Forward,
         IntoFolder,
         Reload,
-        SelectAll,
         ToggleHidden,
         ListView,
         GridView,
@@ -29,15 +28,17 @@ actions!(
         CloseTab,
         NextTab,
         PreviousTab,
-        MoveUp,
-        MoveDown,
         MoveLeft,
         MoveRight,
+        Deselect,
+        FocusFiles,
+        MoveUp,
+        MoveDown,
         ExtendUp,
         ExtendDown,
         MoveHome,
         MoveEnd,
-        Deselect,
+        SelectAll,
         Copy,
         Cut,
         Paste,
@@ -47,8 +48,6 @@ actions!(
         Trash,
         DeletePermanently,
         Rename,
-        CommitRename,
-        CancelRename,
         NewFolder,
         NewFile,
         Duplicate,
@@ -92,13 +91,14 @@ pub struct RemoveBookmark(pub PathBuf);
 #[action(namespace = trove, no_json)]
 pub struct Eject(pub PathBuf);
 
-/// Files dragged inside the app were dropped on a folder: `dragged` is the path the drag
-/// started on, `dest` the folder.
+/// Files were dropped on a folder: dragged from a listing (the whole selection), or in from
+/// another app.
 #[derive(Clone, PartialEq, Debug, Action)]
 #[action(namespace = trove, no_json)]
 pub struct DropOnto {
-    pub dragged: PathBuf,
+    pub paths: Vec<PathBuf>,
     pub dest: PathBuf,
+    pub mode: crate::fileops::Transfer,
 }
 
 /// Alt+1..9: the tab at that position, Explorer's order.
@@ -154,16 +154,16 @@ pub fn bind(cx: &mut App) {
         KeyBinding::new("enter", Open, f),
         KeyBinding::new("secondary-enter", OpenInNewTab, f),
         KeyBinding::new("backspace", Parent, f),
-        KeyBinding::new("secondary-a", SelectAll, f),
+        KeyBinding::new("escape", Deselect, f),
         KeyBinding::new("up", MoveUp, f),
         KeyBinding::new("down", MoveDown, f),
-        KeyBinding::new("left", MoveLeft, f),
-        KeyBinding::new("right", MoveRight, f),
         KeyBinding::new("shift-up", ExtendUp, f),
         KeyBinding::new("shift-down", ExtendDown, f),
         KeyBinding::new("home", MoveHome, f),
         KeyBinding::new("end", MoveEnd, f),
-        KeyBinding::new("escape", Deselect, f),
+        KeyBinding::new("secondary-a", SelectAll, f),
+        KeyBinding::new("left", MoveLeft, f),
+        KeyBinding::new("right", MoveRight, f),
         KeyBinding::new("secondary-c", Copy, f),
         KeyBinding::new("secondary-x", Cut, f),
         KeyBinding::new("secondary-v", Paste, f),
@@ -176,8 +176,6 @@ pub fn bind(cx: &mut App) {
         KeyBinding::new("f2", Rename, f),
         KeyBinding::new("secondary-shift-n", NewFolder, w),
         KeyBinding::new("secondary-d", Duplicate, f),
-        KeyBinding::new("enter", CommitRename, Some(RENAMING)),
-        KeyBinding::new("escape", CancelRename, Some(RENAMING)),
         KeyBinding::new("escape", ClearSearch, Some(SEARCH)),
         KeyBinding::new("escape", CancelPathEdit, Some(PATH_EDIT)),
         KeyBinding::new("tab", CompletePath, Some(PATH_EDIT)),

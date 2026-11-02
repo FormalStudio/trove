@@ -324,3 +324,18 @@ fn columns_view_walks_folders_left_and_right() {
     assert_eq!(h.location(), Location::Dir(look()));
     assert_eq!(h.tab().read(&h.cx).selected_names(), ["sub"], "going left selects the folder left");
 }
+
+#[test]
+fn the_status_line_counts_results_while_they_show() {
+    let mut h = Harness::at(home().to_path_buf());
+    h.search("c");
+    h.search("ch");
+    h.search("chap");
+    assert!(h.tab().read(&h.cx).showing_results());
+    h.act(FocusResults);
+    let found = h.tab().read(&h.cx).results().len();
+    let window = h.window.id();
+    let line = by_test_id(&mut h.cx, window, "status-items").expect("the status line");
+    let drawn = line.name.clone();
+    assert_eq!(drawn, format!("{found} results \u{b7} 1 selected"), "{}", h.snapshot());
+}

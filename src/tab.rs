@@ -4,15 +4,18 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 use std::time::Duration;
 
 use nd::core::WindowId;
 use nd::prelude::*;
+use nd::virtual_list::{List, RowDropped, SelectionChanged};
 use trove_fs::{
     Change, Entry, EntryId, EntryKind, ListError, ListEvent, ListOptions, Listing, Meta, SortKey, SortOrder, Usage,
 };
 
-use crate::actions::{DRAG_FILES, DropOnto, FILES, RENAMING};
+use crate::actions::{DRAG_FILES, DropOnto, FILES, OpenPlaceInNewTab, RENAMING};
+use crate::fileops::Transfer;
 use crate::format::{self, Today};
 use crate::icons;
 use crate::location::Location;
@@ -35,6 +38,8 @@ const ORIGIN_W: f32 = 220.;
 /// How long a job's results wait for the listing to show them before selection gives up.
 const PENDING_FOR: f64 = 4.;
 pub const RENAME_FIELD: &str = "rename";
+/// The listing, whatever it shows: where keys go when no list holds focus.
+pub const VIEW_ID: &str = "files";
 
 /// A name being edited in place.
 #[derive(Clone, Debug, PartialEq)]
@@ -101,14 +106,14 @@ pub struct Tab {
     today: Today,
     typed: String,
     typed_at: f64,
+    /// The row the last click or key landed on, which Enter opens.
     cursor: Option<EntryId>,
-    anchor: Option<EntryId>,
     /// Selected and scrolled to as soon as the listing has it: the folder just left on the way
     /// up, or the file named on the command line.
     reveal: Option<EntryId>,
     width: f32,
-    /// A row took the press, so the tap that ends it is not a click on empty space.
-    row_hit: bool,
+    /// The shown folders, which take drops on their rows.
+    folders: Rc<HashSet<EntryId>>,
     /// The location came off the command line and may name a file: on `NotADirectory` the
     /// tab opens its folder with it selected instead of failing.
     maybe_file: bool,
@@ -175,10 +180,9 @@ impl Tab {
             typed: String::new(),
             typed_at: f64::NEG_INFINITY,
             cursor: None,
-            anchor: None,
             reveal: None,
             width: DEFAULT_WIDTH,
-            row_hit: false,
+            folders: Rc::default(),
             maybe_file: false,
             home: crate::env::get().home.clone(),
             trash: crate::env::get().trash.clone(),
@@ -266,7 +270,7 @@ impl Tab {
         self.visible.iter().filter_map(|id| self.entry(id)).map(|e| e.name.to_string()).collect()
     }
 
-    fn list_state(&self) -> &ListState<EntryId> {
+    pub fn list_state(&self) -> &ListState<EntryId> {
         match self.view {
             View::List => &self.table,
             View::Grid => &self.grid,
@@ -370,7 +374,6 @@ impl Tab {
         self.paths.clear();
         self.visible.clear();
         self.cursor = None;
-        self.anchor = None;
         self.typed.clear();
         self.renaming = None;
         self.pending = None;
@@ -395,7 +398,7 @@ impl Tab {
                     tab.generation == generation && tab.apply(batch, cx)
                 });
                 self.listing = Some(listing);
-                let usage = trove_fs::usage(dir.clone(), Duration::from_secs(2));
+                let usage = crate::env::usage(dir.clone(), Duration::from_secs(2));
                 self.usage = Some(usage.clone());
                 pump(usage, me, move |tab: &mut Tab, answers, cx| {
                     if tab.generation == generation {
@@ -615,6 +618,12 @@ impl Tab {
             })
             .map(|e| e.id)
             .collect();
+        let folders = if self.in_trash {
+            HashSet::new()
+        } else {
+            self.visible.iter().copied().filter(|id| self.listed_folder(id)).collect()
+        };
+        self.folders = Rc::new(folders);
         self.sync_view(cx);
         self.apply_reveal(cx);
         self.apply_pending(cx);
@@ -638,7 +647,7 @@ impl Tab {
 
     fn volume_name(&self) -> String {
         let Some(dir) = self.location.dir() else { return "the folder".to_owned() };
-        let vols = trove_fs::volumes();
+        let vols = crate::env::volumes();
         vols.iter()
             .filter(|v| dir.starts_with(&v.mount_point))
             .max_by_key(|v| v.mount_point.components().count())
@@ -688,7 +697,6 @@ impl Tab {
     }
 
     fn on_sort(&mut self, e: &SortChanged, cx: &mut Context<Self>) {
-        self.row_hit = true;
         let key = match e.column.as_ref() {
             "size" => SortKey::Size,
             "kind" => SortKey::Kind,
@@ -712,54 +720,53 @@ impl Tab {
         true
     }
 
-    // Selection.
+    // Selection. The lists select as the platform does (clicks, Shift and Ctrl, the arrow
+    // keys, Ctrl+A, the marquee) and report each change here.
 
     fn select_only(&mut self, id: EntryId, cx: &mut Context<Self>) {
         self.cursor = Some(id);
-        self.anchor = Some(id);
         let state = self.list_state_mut();
         state.set_selected(vec![id], cx);
         state.scroll_to(id, Align::Nearest, px(0.), cx);
         cx.notify();
     }
 
-    pub(crate) fn on_select(&mut self, e: &SelectEvent<EntryId>, cx: &mut Context<Self>) {
-        self.row_hit = true;
+    pub(crate) fn on_selection_change(&mut self, e: &SelectionChanged<EntryId>, cx: &mut Context<Self>) {
         self.pending = None;
-        // nd: text_field reports no focus loss, so a click on another row stands in for it.
-        if self.renaming.as_ref().is_some_and(|r| r.id != e.key) {
-            self.commit_rename(cx);
-        }
-        self.cursor = Some(e.key);
-        if e.keys.len() <= 1 {
-            self.anchor = Some(e.key);
-        }
+        self.cursor = e.cursor.or_else(|| e.keys.last().copied());
         cx.notify();
     }
 
-    fn on_tap(&mut self, cx: &mut Context<Self>) {
-        if std::mem::take(&mut self.row_hit) {
-            return;
-        }
-        self.commit_rename(cx);
-        if !self.selected().is_empty() {
-            self.list_state_mut().set_selected(Vec::new(), cx);
-            self.cursor = None;
-            self.anchor = None;
-            cx.notify();
-        }
-    }
-
-    pub fn select_all(&mut self, cx: &mut Context<Self>) {
+    /// Selects the row `by` rows from the cursor, wrapping round: Quick Look's arrows.
+    pub fn select_step(&mut self, by: isize, cx: &mut Context<Self>) {
         if self.extras.results.shown() {
-            self.extras.results.select_all(cx);
+            self.extras.results.select_step(by, cx);
             return cx.notify();
         }
-        let all = self.visible.clone();
-        self.list_state_mut().set_selected(all, cx);
+        if let Some(id) = step_in(&self.visible, self.cursor, by) {
+            self.select_only(id, cx);
+        }
+    }
+
+    /// Arrows, Home, End and Select All, bound on the listing: see [`take_keys`].
+    pub fn move_selection(&mut self, to: Move, cx: &mut Context<Self>) {
+        if self.extras.results.shown() {
+            self.extras.results.move_selection(to, cx);
+            return cx.notify();
+        }
+        let selected = self.selected();
+        let Some((keys, cursor)) = moved(&self.visible, &selected, self.cursor, to) else { return };
+        self.pending = None;
+        self.cursor = cursor;
+        let state = self.list_state_mut();
+        state.set_selected(keys, cx);
+        if let Some(at) = cursor {
+            state.scroll_to(at, Align::Nearest, px(0.), cx);
+        }
         cx.notify();
     }
 
+    /// Escape: clears the search first, then the selection.
     pub fn deselect(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.clear_search(window, cx) {
             return;
@@ -767,57 +774,6 @@ impl Tab {
         self.list_state_mut().set_selected(Vec::new(), cx);
         self.cursor = None;
         cx.notify();
-    }
-
-    /// Moves the keyboard cursor by `step` rows (a grid's lane count for up and down);
-    /// `extend` grows the selection from its anchor instead of replacing it.
-    pub fn move_cursor(&mut self, step: isize, extend: bool, cx: &mut Context<Self>) {
-        if self.extras.results.shown() {
-            self.extras.results.move_cursor(step, extend, cx);
-            return cx.notify();
-        }
-        if self.visible.is_empty() {
-            return;
-        }
-        let last = self.visible.len() as isize - 1;
-        let at = self.cursor.and_then(|c| self.visible.iter().position(|id| *id == c));
-        let next = match at {
-            Some(i) => (i as isize + step).clamp(0, last),
-            None if step < 0 => last,
-            None => 0,
-        } as usize;
-        let id = self.visible[next];
-        if !extend {
-            self.select_only(id, cx);
-            return;
-        }
-        let anchor = self.anchor.and_then(|a| self.visible.iter().position(|v| *v == a)).unwrap_or(next);
-        let (lo, hi) = (anchor.min(next), anchor.max(next));
-        let range = self.visible[lo..=hi].to_vec();
-        self.cursor = Some(id);
-        let state = self.list_state_mut();
-        state.set_selected(range, cx);
-        state.scroll_to(id, Align::Nearest, px(0.), cx);
-        cx.notify();
-    }
-
-    pub fn move_to_end(&mut self, end: bool, cx: &mut Context<Self>) {
-        if self.extras.results.shown() {
-            self.extras.results.move_to_end(end, cx);
-            return cx.notify();
-        }
-        let id = if end { self.visible.last() } else { self.visible.first() };
-        if let Some(id) = id.copied() {
-            self.select_only(id, cx);
-        }
-    }
-
-    /// Grid lanes: how many tiles one row of the grid holds.
-    pub fn lanes(&self) -> usize {
-        match self.view {
-            View::List | View::Columns => 1,
-            View::Grid => self.grid.handle().0.borrow().lanes().max(1),
-        }
     }
 
     /// Type-select: characters typed within a short pause build a prefix, and the first name
@@ -860,7 +816,20 @@ impl Tab {
         if self.extras.results.shown() {
             return self.extras.results.is_dir(id);
         }
+        self.listed_folder(id)
+    }
+
+    /// Whether `id` names a folder of the listing, results or not.
+    fn listed_folder(&self, id: &EntryId) -> bool {
         self.entry(id).is_some_and(|e| e.is_dir() || matches!(e.kind, EntryKind::Symlink { .. }) && e.meta.is_none())
+    }
+
+    /// Tiles to a row: what Up and Down step by.
+    pub fn lanes(&self) -> usize {
+        match self.view {
+            View::Grid if !self.extras.results.shown() => self.grid.handle().0.borrow().lanes().max(1),
+            _ => 1,
+        }
     }
 
     pub fn set_width(&mut self, width: f32, cx: &mut Context<Self>) {
@@ -963,40 +932,66 @@ impl Tab {
         self.file_events(row, id, cx).into_any_element()
     }
 
-    /// A row's or tile's menu, drag and drop.
-    fn file_events(&self, d: Div, id: EntryId, cx: &mut Context<Self>) -> Div {
+    /// A row's or tile's menu, and a middle click on a folder opening it in a new tab.
+    pub(crate) fn file_events(&self, d: Div, id: EntryId, cx: &mut Context<Self>) -> Div {
         let Some(path) = self.path_of(&id) else { return d };
         let me = cx.weak_entity();
-        let d = d.draggable(DragItem::new(DRAG_FILES, path.display().to_string())).context_menu(move |menu, _, cx| {
+        let d = d.context_menu(move |menu, _, cx| {
             let Some(target) = me.update(cx, |t, cx| t.menu_target(id, cx)) else { return menu };
             menus::files(menu, &target, cx)
         });
-        if !self.is_folder(&id) || self.in_trash {
+        if !self.is_folder(&id) {
             return d;
         }
-        d.accepts_drops([DRAG_FILES]).on_drop(move |e: &Dropped, window, cx| {
-            let dragged = PathBuf::from(e.item.id.as_ref());
-            cx.dispatch_action(window.id(), &DropOnto { dragged, dest: path.clone() });
+        d.on_middle_click(move |_: &MiddleClickEvent, window, cx| {
+            cx.dispatch_action(window.id(), &OpenPlaceInNewTab(path.clone()));
         })
+    }
+
+    /// Where a drop on a row or on empty space goes: into the folder dropped on, else the folder
+    /// shown. Nothing lands in a trash, in Recent or on the results' empty space.
+    pub(crate) fn drop_on_row(&self, e: &RowDropped<EntryId>) -> Option<DropOnto> {
+        let kind = e.item.kind.as_ref();
+        if self.in_trash || kind != DRAG_FILES && kind != DragItem::FILES {
+            return None;
+        }
+        let dest = match e.key {
+            Some(id) if self.is_folder(&id) => self.path_of(&id),
+            _ if self.extras.results.shown() => None,
+            _ => self.location.dir().map(Path::to_path_buf),
+        }?;
+        let paths = e.item.ids.iter().map(|id| PathBuf::from(id.as_ref())).collect();
+        Some(DropOnto { paths, dest, mode: Transfer::from_modifiers(e.modifiers) })
+    }
+
+    /// What a dragged row carries: its path.
+    pub(crate) fn drag_id(&self, id: &EntryId) -> SharedString {
+        self.path_of(id).map(|p| p.display().to_string()).unwrap_or_default().into()
     }
 
     /// The name field of a rename in progress, in a row or (`tile`) under a tile's picture.
     fn rename_field(&self, r: &Rename, tile: bool, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme();
-        let (change, submit) = (cx.weak_entity(), cx.weak_entity());
-        // nd: text_field cannot select a range, so the name minus its extension is not
-        // preselected; the field opens with the whole name and the caret at its end.
+        let (change, end, cancel) = (cx.weak_entity(), cx.weak_entity(), cx.weak_entity());
+        let folder = self.listed_folder(&r.id);
         let field = text_field(RENAME_FIELD)
             .text(r.text.clone())
             .label("Name")
             .disabled(r.job.is_some())
+            .select_on_focus(0..stem_chars(&r.original, folder))
             .flex_1()
             .min_w_0()
             .on_change(move |e: &TextChanged, _, cx| {
                 let _ = change.update(cx, |t, cx| t.set_rename_text(e.text.clone(), cx));
             })
-            .on_submit(move |_: &TextSubmitted, _, cx| {
-                let _ = submit.update(cx, |t, cx| t.commit_rename(cx));
+            .on_end_editing(move |e: &TextEditingEnded, _, cx| {
+                let _ = end.update(cx, |t, cx| {
+                    t.set_rename_text(e.text.clone(), cx);
+                    t.commit_rename(cx);
+                });
+            })
+            .on_cancel(move |_: &TextCancelled, _, cx| {
+                let _ = cancel.update(cx, |t, cx| t.cancel_rename(cx));
             });
         let error = r.error.clone().map(|why| {
             text(why).id("rename-error").text_size(theme.type_scale.footnote).text_color(theme.text.danger).truncate()
@@ -1086,19 +1081,108 @@ impl Tab {
     }
 
     fn failure(&self, e: &ListError) -> AnyElement {
-        let path = self.location.dir().map(|p| p.display().to_string()).unwrap_or_default();
-        let (title, icon) = match e {
-            ListError::NotFound => ("Folder not found", Icon::TriangleAlert),
-            ListError::PermissionDenied => ("Permission denied", Icon::Lock),
-            ListError::NotADirectory => ("Not a folder", Icon::TriangleAlert),
-            ListError::Io(_) => ("Could not read the folder", Icon::TriangleAlert),
-        };
-        let description = match e {
-            ListError::Io(why) => format!("{path}\n{why}"),
-            _ => path,
+        let name = self.title();
+        let (title, icon, description) = match e {
+            ListError::NotFound => {
+                ("Folder not found", Icon::TriangleAlert, format!("\u{201c}{name}\u{201d} was moved or deleted."))
+            }
+            ListError::PermissionDenied => (
+                "Permission denied",
+                Icon::Lock,
+                format!("You don\u{2019}t have permission to open \u{201c}{name}\u{201d}."),
+            ),
+            ListError::NotADirectory => {
+                ("Not a folder", Icon::TriangleAlert, format!("\u{201c}{name}\u{201d} is a file."))
+            }
+            ListError::Io(why) => ("Could not read the folder", Icon::TriangleAlert, why.to_string()),
         };
         status_page(title).id("listing-error").icon(icon).description(description).into_any_element()
     }
+}
+
+// nd: a list is no focusable node, so window.focus cannot reach it and a press on it leaves nd
+// focus on nothing, where no binding of the listing matches. The listing takes focus back on
+// the press's selection change, and its own bindings move the selection.
+pub(crate) fn take_keys(window: &mut Window) {
+    window.focus(VIEW_ID);
+}
+
+/// What an arrow, Home, End or Select All asks of a listing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Move {
+    By(isize),
+    /// Shift and an arrow: grows the range towards the next row, or shrinks it back.
+    Extend(isize),
+    Home,
+    End,
+    All,
+}
+
+/// The selection and cursor `to` leaves in `rows`, None when nothing changes.
+pub fn moved(
+    rows: &[EntryId],
+    selected: &[EntryId],
+    cursor: Option<EntryId>,
+    to: Move,
+) -> Option<(Vec<EntryId>, Option<EntryId>)> {
+    let last = rows.len().checked_sub(1)?;
+    let at = cursor.and_then(|c| rows.iter().position(|id| *id == c));
+    let step = |by: isize| match at {
+        Some(i) => rows[(i as isize + by).clamp(0, last as isize) as usize],
+        None if by < 0 => rows[last],
+        None => rows[0],
+    };
+    let only = |id: EntryId| Some((vec![id], Some(id)));
+    match to {
+        Move::By(by) => only(step(by)),
+        Move::Home => only(rows[0]),
+        Move::End => only(rows[last]),
+        Move::All => Some((rows.to_vec(), cursor)),
+        Move::Extend(by) => {
+            let next = step(by);
+            let mut keys = selected.to_vec();
+            match cursor {
+                Some(c) if c != next && keys.contains(&next) => keys.retain(|k| *k != c),
+                _ if !keys.contains(&next) => keys.push(next),
+                _ => {}
+            }
+            keys.sort_by_key(|k| rows.iter().position(|r| r == k));
+            Some((keys, Some(next)))
+        }
+    }
+}
+
+/// The key `by` rows from `cursor` in `rows`, wrapping round; the first or last with none.
+pub(crate) fn step_in(rows: &[EntryId], cursor: Option<EntryId>, by: isize) -> Option<EntryId> {
+    let n = rows.len() as isize;
+    if n == 0 {
+        return None;
+    }
+    let at = cursor.and_then(|c| rows.iter().position(|id| *id == c));
+    let next = match at {
+        Some(i) => (i as isize + by).rem_euclid(n),
+        None if by < 0 => n - 1,
+        None => 0,
+    };
+    rows.get(next as usize).copied()
+}
+
+/// How much of `name` a rename preselects: all of a folder's, a file's up to its extension
+/// (".tar.gz" and the like counting as one), and all of a name that only starts with a dot.
+pub fn stem_chars(name: &str, folder: bool) -> usize {
+    let all = name.chars().count();
+    if folder {
+        return all;
+    }
+    let lower = name.to_lowercase();
+    let double = [".tar.gz", ".tar.xz", ".tar.bz2", ".tar.zst"].iter().find(|ext| lower.ends_with(*ext));
+    let cut = match double {
+        Some(ext) if name.len() > ext.len() && name.is_char_boundary(name.len() - ext.len()) => {
+            Some(name.len() - ext.len())
+        }
+        _ => name.rfind('.').filter(|at| *at > 0),
+    };
+    cut.map_or(all, |at| name[..at].chars().count())
 }
 
 /// The size column: bytes for files, the count for a folder once something counted it.
@@ -1173,41 +1257,27 @@ impl Render for Tab {
                 .into_any_element(),
             _ => match self.view {
                 View::List => {
-                    let (sel, act, sort) = (me.clone(), me.clone(), me.clone());
+                    let sort = me.clone();
                     let cell = cx.processor(Self::table_cell);
-                    table("files-table", &self.table, self.columns(), move |id, col, w, cx| cell((id, col), w, cx))
-                        .selection(Selection::multiple())
-                        .estimated_row_height(px(ROW_HEIGHT))
-                        .on_select(move |e: &SelectEvent<EntryId>, _, cx| {
-                            let _ = sel.update(cx, |t, cx| t.on_select(e, cx));
-                        })
-                        .on_activate(move |e: &ActivateEvent<EntryId>, window, cx| {
-                            activate(&act, e.key, window, cx);
-                        })
-                        .on_sort(move |e: &SortChanged, _, cx| {
-                            let _ = sort.update(cx, |t, cx| t.on_sort(e, cx));
-                        })
-                        .empty(self.empty_state())
-                        .into_any_element()
+                    let list =
+                        table("files-table", &self.table, self.columns(), move |id, col, w, cx| cell((id, col), w, cx))
+                            .estimated_row_height(px(ROW_HEIGHT))
+                            .on_sort(move |e: &SortChanged, _, cx| {
+                                let _ = sort.update(cx, |t, cx| t.on_sort(e, cx));
+                            })
+                            .empty(self.empty_state());
+                    self.file_list(list, &self.table, cx).into_any_element()
                 }
                 View::Grid => {
-                    let (sel, act) = (me.clone(), me.clone());
-                    grid("files-grid", &self.grid, (px(TILE.0), px(TILE.1)), cx.processor(Self::tile))
+                    let list = grid("files-grid", &self.grid, (px(TILE.0), px(TILE.1)), cx.processor(Self::tile))
                         .gap(theme.spacing.xs)
-                        .selection(Selection::multiple())
-                        .on_select(move |e: &SelectEvent<EntryId>, _, cx| {
-                            let _ = sel.update(cx, |t, cx| t.on_select(e, cx));
-                        })
-                        .on_activate(move |e: &ActivateEvent<EntryId>, window, cx| {
-                            activate(&act, e.key, window, cx);
-                        })
-                        .empty(self.empty_state())
-                        .into_any_element()
+                        .empty(self.empty_state());
+                    self.file_list(list, &self.grid, cx).into_any_element()
                 }
                 View::Columns => crate::columns::render(self, width, cx),
             },
         };
-        let (resize, tap, menu) = (me.clone(), me.clone(), me);
+        let (resize, menu) = (me.clone(), me);
         let banner = self.in_trash.then(|| {
             banner("trash-banner", "Items stay in the Trash until you empty it.").action("Empty Trash").on_action(
                 |_: &BannerActionClicked, window, cx| {
@@ -1215,9 +1285,8 @@ impl Render for Tab {
                 },
             )
         });
-        let here = self.location.dir().map(Path::to_path_buf);
         div()
-            .id("files")
+            .id(VIEW_ID)
             .key_context(if self.renaming.is_some() { RENAMING } else { FILES })
             .focusable()
             .size_full()
@@ -1226,18 +1295,9 @@ impl Render for Tab {
             .on_resize(move |r, _, cx| {
                 let _ = resize.update(cx, |t, cx| t.set_width(r.width, cx));
             })
-            .on_tap(move |_: &TapEvent, _, cx| {
-                let _ = tap.update(cx, |t, cx| t.on_tap(cx));
-            })
             .context_menu(move |m, window, cx| {
                 let Some(here) = menu.update(cx, |t, cx| t.here(window, cx)) else { return m };
                 menus::folder(m, &here)
-            })
-            .when_some(here.filter(|_| !self.in_trash), |d, dir| {
-                d.accepts_drops([DRAG_FILES]).on_drop(move |e: &Dropped, window, cx| {
-                    let dragged = PathBuf::from(e.item.id.as_ref());
-                    cx.dispatch_action(window.id(), &DropOnto { dragged, dest: dir.clone() });
-                })
             })
             .children(banner)
             .child(div().flex_1().min_h_0().child(body))
@@ -1245,6 +1305,47 @@ impl Render for Tab {
 }
 
 impl Tab {
+    /// A listing's list: multiple selection reported back, rows dragging their paths, and drops
+    /// on folders and on empty space.
+    pub(crate) fn file_list(
+        &self,
+        list: List<EntryId>,
+        state: &ListState<EntryId>,
+        cx: &mut Context<Self>,
+    ) -> List<EntryId> {
+        let me = cx.weak_entity();
+        let (sel, act, drop) = (me.clone(), me.clone(), me);
+        let list = list
+            .selection(Selection::multiple())
+            .on_selection_change(move |e: &SelectionChanged<EntryId>, window, cx| {
+                take_keys(window);
+                let _ = sel.update(cx, |t, cx| t.on_selection_change(e, cx));
+            })
+            .on_activate(move |e: &ActivateEvent<EntryId>, window, cx| {
+                let _ = act.update(cx, |t, cx| t.open(e.key, window, cx));
+            });
+        if self.in_trash {
+            return list;
+        }
+        let ids = self.drag_ids(state);
+        let folders = self.folders.clone();
+        list.drag_rows(DRAG_FILES, move |id| ids.get(id).cloned().unwrap_or_default())
+            .accepts_drops([DRAG_FILES, DragItem::FILES])
+            .drop_on(move |id| folders.contains(id))
+            .on_drop(move |e: &RowDropped<EntryId>, window, cx| {
+                let Some(tab) = drop.upgrade() else { return };
+                if let Some(action) = tab.read(cx).drop_on_row(e) {
+                    cx.dispatch_action(window.id(), &action);
+                }
+            })
+    }
+
+    /// The paths the rows a drag can start on carry: the ones drawn and the ones selected.
+    pub(crate) fn drag_ids(&self, state: &ListState<EntryId>) -> Rc<HashMap<EntryId, SharedString>> {
+        let rows = state.rendered().into_iter().chain(state.selected());
+        Rc::new(rows.map(|id| (id, self.drag_id(&id))).collect())
+    }
+
     fn table_cell(&mut self, (id, col): (EntryId, usize), window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         self.cell(id, col, window, cx)
     }
@@ -1438,7 +1539,7 @@ impl Tab {
         if let Some(r) = self.renaming.take() {
             self.bump(r.id);
             self.sync_view(cx);
-            self.focus_next = Some("files");
+            self.focus_next = Some(VIEW_ID);
             cx.notify();
         }
     }
@@ -1489,7 +1590,6 @@ impl Tab {
         let ids: Vec<EntryId> = names.iter().map(|n| EntryId::of(n)).filter(|id| shown.contains(id)).collect();
         let Some(&first) = ids.first() else { return };
         self.cursor = Some(first);
-        self.anchor = Some(first);
         self.list_state_mut().set_selected(ids, cx);
         cx.notify();
     }
@@ -1509,7 +1609,6 @@ impl Tab {
         let rename = p.rename && all && landed.len() == 1;
         let first = landed[0];
         self.cursor = Some(first);
-        self.anchor = Some(first);
         let state = self.list_state_mut();
         state.set_selected(landed, cx);
         state.scroll_to(first, Align::Nearest, px(0.), cx);
@@ -1557,14 +1656,6 @@ impl Tab {
     }
 }
 
-/// A double click or Enter on a row: folders open in this tab, files in their app.
-fn activate(tab: &WeakEntity<Tab>, id: EntryId, window: &mut Window, cx: &mut App) {
-    let _ = tab.update(cx, |t, cx| {
-        t.row_hit = true;
-        t.open(id, window, cx);
-    });
-}
-
 impl Tab {
     pub fn open(&mut self, id: EntryId, window: &mut Window, cx: &mut Context<Self>) {
         let Some(path) = self.path_of(&id) else { return };
@@ -1592,7 +1683,6 @@ impl Tab {
     pub(crate) fn restore_selection(&mut self, keys: Vec<EntryId>, cursor: Option<EntryId>, cx: &mut Context<Self>) {
         let keys: Vec<EntryId> = keys.into_iter().filter(|k| self.visible.contains(k)).collect();
         self.cursor = cursor.filter(|c| keys.contains(c)).or_else(|| keys.first().copied());
-        self.anchor = self.cursor;
         let at = self.cursor;
         let state = self.list_state_mut();
         state.set_selected(keys, cx);

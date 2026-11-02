@@ -35,12 +35,6 @@ pub fn register(root: Scaffold, cx: &mut Context<Root>) -> Scaffold {
         .on_action(cx.listener(|r, _: &Rename, window, cx| {
             r.active_tab().clone().update(cx, |t, cx| t.start_rename(window, cx));
         }))
-        .on_action(cx.listener(|r, _: &CommitRename, _, cx| {
-            r.active_tab().clone().update(cx, |t, cx| t.commit_rename(cx));
-        }))
-        .on_action(cx.listener(|r, _: &CancelRename, _, cx| {
-            r.active_tab().clone().update(cx, |t, cx| t.cancel_rename(cx));
-        }))
         .on_action(cx.listener(|r, _: &NewFolder, _, cx| new_item(r, true, cx)))
         .on_action(cx.listener(|r, _: &NewFile, _, cx| new_item(r, false, cx)))
         .on_action(cx.listener(|r, _: &Duplicate, _, cx| {
@@ -269,36 +263,75 @@ fn sort_by(r: &mut Root, key: SortKey, cx: &mut Context<Root>) {
     });
 }
 
-/// A drag dropped on a folder. Dragging a selected row carries the whole selection. On one
-/// file system it moves, across file systems it copies, as Finder does.
-fn drop_onto(r: &mut Root, e: &DropOnto, cx: &mut Context<Root>) {
-    let selected = selection(r, cx);
-    let sources: Vec<PathBuf> = if selected.contains(&e.dragged) { selected } else { vec![e.dragged.clone()] };
-    let dest = e.dest.clone();
-    let sources: Vec<PathBuf> = sources.into_iter().filter(|s| *s != dest).collect();
-    if sources.is_empty() || sources.iter().all(|s| s.parent() == Some(dest.as_path())) {
-        return;
-    }
-    let o = origin(r, cx);
-    transfer(cx, o, sources, dest);
+/// How a drop moves its files: by the file system rule, or as the held key asks.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Transfer {
+    /// One file system moves, another copies, as Finder and Files do.
+    #[default]
+    Auto,
+    Copy,
+    Move,
 }
 
-/// Moves `sources` into `dest` when they share its file system, else copies them.
-// nd: Dropped carries no modifier keys, so Ctrl (always copy) and Shift (always move) are not
-// read yet; every drop follows the file system rule.
-pub fn transfer(cx: &mut App, origin: Origin, sources: Vec<PathBuf>, dest: PathBuf) {
-    let jobs = ops::jobs(cx);
+impl Transfer {
+    /// Control (or Alt) copies and Shift moves, whatever the file systems.
+    pub fn from_modifiers(m: KeyModifiers) -> Self {
+        if m.control || m.alt {
+            Self::Copy
+        } else if m.shift {
+            Self::Move
+        } else {
+            Self::Auto
+        }
+    }
+}
+
+/// Files dropped on a folder. Dropping into the Trash trashes them; dropping where they already
+/// are does nothing unless the drop asks for a copy.
+fn drop_onto(r: &mut Root, e: &DropOnto, cx: &mut Context<Root>) {
+    let dest = e.dest.clone();
+    let sources: Vec<PathBuf> =
+        e.paths.iter().filter(|s| **s != dest && !dest.starts_with(s.as_path())).cloned().collect();
+    let o = origin(r, cx);
+    if dest == crate::env::get().trash {
+        if !sources.is_empty() {
+            ops::submit(cx, o, Op::Trash { paths: sources });
+        }
+        return;
+    }
+    let all_here = sources.iter().all(|s| s.parent() == Some(dest.as_path()));
+    if sources.is_empty() || all_here && e.mode != Transfer::Copy {
+        return;
+    }
+    let root = cx.weak_entity();
+    transfer(cx, root, o, sources, dest, e.mode);
+}
+
+/// Copies or moves `sources` into `dest`: `Auto` moves when they share its file system.
+pub fn transfer(
+    cx: &mut App,
+    root: WeakEntity<Root>,
+    origin: Origin,
+    sources: Vec<PathBuf>,
+    dest: PathBuf,
+    mode: Transfer,
+) {
+    let submit = move |cx: &mut App, sources, dest, copy: bool| {
+        let op = if copy { Op::Copy { sources, dest_dir: dest } } else { Op::Move { sources, dest_dir: dest } };
+        ops::submit(cx, origin, op);
+    };
+    if mode != Transfer::Auto {
+        submit(cx, sources, dest, mode == Transfer::Copy);
+        return;
+    }
     let (s, d) = (sources.clone(), dest.clone());
     ops::background(
-        jobs.downgrade(),
+        root,
         move || {
             let dev = |p: &Path| std::fs::symlink_metadata(p).ok().map(|m| m.dev());
             let to = dev(&d);
             to.is_some() && s.iter().all(|p| dev(p) == to)
         },
-        move |_: &mut ops::Jobs, same, cx| {
-            let op = if same { Op::Move { sources, dest_dir: dest } } else { Op::Copy { sources, dest_dir: dest } };
-            ops::submit(cx, origin, op);
-        },
+        move |_: &mut Root, same, cx| submit(cx, sources, dest, !same),
     );
 }

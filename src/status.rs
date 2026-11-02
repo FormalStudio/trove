@@ -33,8 +33,7 @@ impl StatusBar {
         let Some(tab) = &self.tab else { return (String::new(), String::new()) };
         let tab = tab.read(cx);
         if tab.showing_results() {
-            let found = tab.results().len();
-            let mut left = if found == 1 { "1 result".to_owned() } else { format!("{} results", format::group(found)) };
+            let mut left = tab.results().count_label();
             let selected = tab.selected_paths().len();
             if selected > 0 {
                 left.push_str(&format!(" \u{b7} {} selected", format::group(selected)));

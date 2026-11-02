@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use tempfile::TempDir;
 
 use super::*;
-use crate::desktop::{expand_exec, in_terminal, set_default_text, tokenize_exec};
+use crate::desktop::{Launch, expand_exec as expand_launches, in_terminal, set_default_text, tokenize_exec};
 
 struct Fixture {
     root: TempDir,
@@ -277,9 +277,13 @@ fn set_default_writes_the_user_file_and_wins() {
     assert_eq!(Registry::load(env).default_app("text/plain").unwrap().id, "b.desktop");
 }
 
-fn record(log: &RefCell<Vec<Vec<String>>>) -> impl Fn(&[String]) -> Result<(), String> + '_ {
-    move |argv| {
-        log.borrow_mut().push(argv.to_vec());
+fn expand_exec(app: &AppInfo, files: &[PathBuf]) -> Result<Vec<Vec<String>>, String> {
+    Ok(expand_launches(app, files)?.into_iter().map(|l| l.argv).collect())
+}
+
+fn record(log: &RefCell<Vec<Vec<String>>>) -> impl Fn(&Launch) -> Result<(), String> + '_ {
+    move |launch| {
+        log.borrow_mut().push(launch.argv.clone());
         Ok(())
     }
 }

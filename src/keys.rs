@@ -63,12 +63,17 @@ pub fn on_root(root: Scaffold, cx: &mut Context<Root>) -> Scaffold {
     .on_action(cx.listener(|this, _: &ShowInFolder, window, cx| {
         let tab = this.active_tab().clone();
         tab.update(cx, |t, cx| show_in_folder(t, window, cx));
-        window.focus("files");
+        this.focus_files(window, cx);
     }))
     .on_action(cx.listener(|this, _: &FocusResults, window, cx| {
         let tab = this.active_tab().clone();
-        tab.update(cx, |t, cx| t.move_cursor(1, false, cx));
-        window.focus("files");
+        tab.update(cx, |t, cx| {
+            if t.showing_results() {
+                t.extras.results.select_first(cx);
+                cx.notify();
+            }
+        });
+        this.focus_files(window, cx);
     }))
 }
 

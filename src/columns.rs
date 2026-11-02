@@ -20,6 +20,8 @@ use crate::tab::{ROW_HEIGHT, Tab};
 
 const COLUMN_W: f32 = 220.;
 const PREVIEW_MIN: f32 = 280.;
+/// The tab's own column.
+pub const CURRENT: &str = "files-columns";
 
 pub struct Columns {
     /// The tab's own folder, the column the keyboard is in.
@@ -278,7 +280,7 @@ pub fn step(tab: &mut Tab, by: isize, cx: &mut Context<Tab>) {
 }
 
 /// A row of any column: icon, name, and a chevron for folders.
-fn row(e: &Entry, theme: &Theme) -> AnyElement {
+fn row(e: &Entry, theme: &Theme) -> Div {
     let symlinked = matches!(e.kind, EntryKind::Symlink { .. }) && e.is_dir();
     let glyph = if symlinked { icons::symlinked_folder() } else { icons::for_kind(e.file_kind) };
     h_flex()
@@ -295,7 +297,6 @@ fn row(e: &Entry, theme: &Theme) -> AnyElement {
                 .child(text(e.name.to_string()).truncate().when(e.hidden, |t| t.text_color(theme.text.secondary))),
         )
         .when(e.is_dir(), |r| r.child(icon(Icon::ChevronRight, 12.).text_color(theme.text.tertiary)))
-        .into_any_element()
 }
 
 impl Tab {
@@ -309,17 +310,16 @@ impl Tab {
         let columns = &self.extras.columns;
         let entry = columns.level(&dir).and_then(|l| l.index.get(&id).and_then(|i| l.entries.get(*i)));
         match entry {
-            Some(e) => row(e, theme),
+            Some(e) => row(e, theme).into_any_element(),
             None => div().into_any_element(),
         }
     }
 
     fn current_row(&mut self, id: EntryId, _window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme();
-        match self.entry(&id) {
-            Some(e) => row(e, theme),
-            None => div().into_any_element(),
-        }
+        let Some(e) = self.entry(&id) else { return div().into_any_element() };
+        let r = row(e, theme);
+        self.file_events(r, id, cx).into_any_element()
     }
 }
 
@@ -376,7 +376,7 @@ pub fn render(tab: &mut Tab, width: f32, cx: &mut Context<Tab>) -> AnyElement {
                 let key = e.key;
                 let _ = sel.update(cx, |t, cx| {
                     t.retarget(Location::Dir(to), Some(key), cx);
-                    window.focus("files");
+                    window.focus(crate::tab::VIEW_ID);
                 });
             })
             .on_activate(move |e: &ActivateEvent<EntryId>, window, cx| {
@@ -397,16 +397,8 @@ pub fn render(tab: &mut Tab, width: f32, cx: &mut Context<Tab>) -> AnyElement {
     for (i, level) in tab.extras.columns.levels.iter().enumerate().skip(skip) {
         row_items.push(column(level_list(level, format!("column-{i}"), me.clone(), cx)));
     }
-    let (sel, act) = (me.clone(), me.clone());
-    let current = list("files-columns", &tab.extras.columns.current, cx.processor(Tab::current_row))
-        .selection(Selection::multiple())
-        .on_select(move |e: &SelectEvent<EntryId>, _, cx| {
-            let _ = sel.update(cx, |t, cx| t.on_select(e, cx));
-        })
-        .on_activate(move |e: &ActivateEvent<EntryId>, window, cx| {
-            let _ = act.update(cx, |t, cx| t.open(e.key, window, cx));
-        })
-        .into_any_element();
+    let current = list(CURRENT, &tab.extras.columns.current, cx.processor(Tab::current_row));
+    let current = tab.file_list(current, &tab.extras.columns.current, cx).into_any_element();
     row_items.push(column(current));
     if let Some(child) = &tab.extras.columns.child {
         row_items.push(column(level_list(child, "column-next".to_owned(), me.clone(), cx)));

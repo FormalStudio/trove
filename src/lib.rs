@@ -38,7 +38,7 @@ use nd::prelude::*;
 
 pub use location::Location;
 pub use root::{Root, Start};
-pub use tab::{Load, Rename, Tab, View};
+pub use tab::{Load, RENAME_FIELD, Rename, Tab, View, stem_chars};
 pub use trash::TrashInfo;
 
 pub use columns::Columns;

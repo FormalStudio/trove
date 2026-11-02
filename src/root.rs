@@ -14,7 +14,13 @@ use crate::pathbar::PathBar;
 use crate::preview::Preview;
 use crate::sidebar::Sidebar;
 use crate::status::StatusBar;
-use crate::tab::{Tab, View};
+use crate::tab::{Move, Tab, View};
+
+/// The widest a tab gets, as in Explorer: a few tabs keep their titles instead of each taking
+/// a share of the window.
+const TAB_W: f32 = 220.;
+/// The strip's `+` past the last tab.
+const ADD_W: f32 = 44.;
 
 /// Where the first tab opens.
 #[derive(Clone, Debug, PartialEq)]
@@ -229,8 +235,21 @@ impl Root {
         self.chrome = None;
         self.sync_chrome(cx);
         self.save_session(cx);
-        window.focus("files");
+        self.focus_files(window, cx);
         cx.notify();
+    }
+
+    /// Keys go to the listing.
+    pub(crate) fn focus_files(&self, window: &mut Window, _cx: &App) {
+        window.focus(crate::tab::VIEW_ID);
+    }
+
+    /// Up and Down step a whole row of tiles in the grid.
+    fn move_rows(&mut self, by: isize, extend: bool, cx: &mut Context<Self>) {
+        self.with_tab(cx, |t, cx| {
+            let by = by * t.lanes() as isize;
+            t.move_selection(if extend { Move::Extend(by) } else { Move::By(by) }, cx);
+        });
     }
 
     fn sync_chrome(&mut self, cx: &mut Context<Self>) {
@@ -301,7 +320,7 @@ impl Root {
 
     fn go(&mut self, location: Location, window: &mut Window, cx: &mut Context<Self>) {
         self.active_tab().clone().update(cx, |t, cx| t.navigate(location, window, cx));
-        window.focus("files");
+        self.focus_files(window, cx);
     }
 
     fn with_tab(&mut self, cx: &mut Context<Self>, f: impl FnOnce(&mut Tab, &mut Context<Tab>)) {
@@ -388,18 +407,20 @@ impl Root {
         crate::session::save(cx, session);
     }
 
-    /// Files dropped from another app land in the folder the active tab shows.
+    /// Files from another app dropped where nothing takes them land in the folder the active
+    /// tab shows.
     fn register_drops(&self) {
         let me = self.me();
         let window = self.window;
-        // nd: SystemEvent::FileDrop names the window and a position but no element, so a drop
-        // from another app cannot target the folder row or sidebar place under the pointer.
+        // nd: on macOS files from other apps arrive only as FileDrop, with a position but no
+        // element, so there a drop on a folder row or a sidebar place lands here too.
         nd::system::on_event(&nd::system::system(), move |event, cx| {
             let nd::system::SystemEvent::FileDrop { window: on, paths, .. } = event else { return };
             if *on != window || paths.is_empty() {
                 return;
             }
             let Some(root) = me.upgrade() else { return };
+            let at = me.clone();
             let (origin, dest) = {
                 let r = root.read(cx);
                 let tab = r.active_tab().read(cx);
@@ -407,39 +428,40 @@ impl Root {
                 (crate::ops::Origin { window, tab: Some(r.active_tab().downgrade()) }, dest)
             };
             if let Some(dest) = dest {
-                crate::fileops::transfer(cx, origin, paths.clone(), dest);
+                crate::fileops::transfer(cx, at, origin, paths.clone(), dest, crate::fileops::Transfer::Auto);
             }
         });
     }
 
     fn view_switch(&self) -> impl IntoElement + use<> {
         let view = self.chrome.as_ref().map_or(View::List, |c| c.view);
-        button_group()
-            .child(
-                icon_button("view-list", icons::list_view())
-                    .checked(view == View::List)
-                    .tooltip("List")
-                    .dispatch(ListView),
-            )
-            .child(
-                icon_button("view-grid", icons::grid_view())
-                    .checked(view == View::Grid)
-                    .tooltip("Grid")
-                    .dispatch(GridView),
-            )
-            .child(
-                icon_button("view-columns", icons::columns_view())
-                    .checked(view == View::Columns)
-                    .tooltip("Columns")
-                    .dispatch(crate::keys::ColumnsView),
-            )
+        let at = match view {
+            View::List => 0,
+            View::Grid => 1,
+            View::Columns => 2,
+        };
+        segmented("view", ["List", "Grid", "Columns"])
+            .icons([icons::list_view(), icons::grid_view(), icons::columns_view()])
+            .label("View")
+            .selected(at)
+            .on_change(|e: &SelectChanged, window, cx| {
+                let action: &dyn Action = match e.index {
+                    0 => &ListView,
+                    1 => &GridView,
+                    _ => &crate::keys::ColumnsView,
+                };
+                cx.dispatch_action(window.id(), action);
+            })
     }
 
     fn tab_strip(&self) -> impl IntoElement + use<> {
         let count = self.tabs.len();
-        // nd: tab_strip has no per-tab context menu or drop target, so the menu acts on the
-        // active tab and files cannot be dropped on a tab.
-        div().id("tab-strip").child(self.tab_bar()).context_menu(move |menu, _, _| crate::menus::tabs(menu, count))
+        // nd: tab_strip takes no context menu per tab, so the menu acts on the active one.
+        h_flex()
+            .id("tab-strip")
+            .w_full()
+            .child(div().flex_1().min_w_0().max_w(px(TAB_W * count as f32 + ADD_W)).child(self.tab_bar()))
+            .context_menu(move |menu, _, _| crate::menus::tabs(menu, count))
     }
 
     fn tab_bar(&self) -> TabStrip {
@@ -450,7 +472,7 @@ impl Root {
             icon: None,
             closable: true,
         });
-        let (select, close, add) = (self.me(), self.me(), self.me());
+        let (select, close, add, drop) = (self.me(), self.me(), self.me(), self.me());
         tab_strip("tabs")
             .presentation(TabStyle::Strip)
             .add_button(true)
@@ -476,6 +498,19 @@ impl Root {
                     let here = this.active_tab().read(cx).location().clone();
                     this.new_tab(here, true, window, cx);
                 });
+            })
+            .accepts_drops([DRAG_FILES, DragItem::FILES])
+            .on_drop(move |e: &Dropped, window, cx| {
+                let Some(this) = drop.upgrade() else { return };
+                let dest = {
+                    let r = this.read(cx);
+                    let tab = e.slot.as_ref().and_then(|s| s.on.as_deref()).and_then(|id| r.index_of(id));
+                    tab.and_then(|i| r.tabs[i].1.read(cx).location().dir().map(PathBuf::from))
+                };
+                let Some(dest) = dest else { return };
+                let paths = e.item.ids.iter().map(|id| PathBuf::from(id.as_ref())).collect();
+                let mode = crate::fileops::Transfer::from_modifiers(e.modifiers);
+                cx.dispatch_action(window.id(), &DropOnto { paths, dest, mode });
             })
     }
 
@@ -526,18 +561,18 @@ impl Root {
             .on_action(cx.listener(Self::toggle_hidden))
             .on_action(cx.listener(|this, _: &Back, window, cx| {
                 this.with_tab(cx, |t, cx| t.go_back(window, cx));
-                window.focus("files");
+                this.focus_files(window, cx);
             }))
             .on_action(cx.listener(|this, _: &Forward, window, cx| {
                 this.with_tab(cx, |t, cx| t.go_forward(window, cx));
-                window.focus("files");
+                this.focus_files(window, cx);
             }))
+            .on_action(cx.listener(|this, _: &FocusFiles, window, cx| this.focus_files(window, cx)))
             .on_action(cx.listener(|this, _: &Parent, window, cx| this.with_tab(cx, |t, cx| t.go_up(window, cx))))
             .on_action(cx.listener(|this, _: &Reload, _, cx| this.with_tab(cx, |t, cx| t.reload(cx))))
             .on_action(
                 cx.listener(|this, GoTo(path): &GoTo, window, cx| this.go(Location::Dir(path.clone()), window, cx)),
             )
-            .on_action(cx.listener(|this, _: &SelectAll, _, cx| this.with_tab(cx, |t, cx| t.select_all(cx))))
             .on_action(cx.listener(|this, _: &Deselect, window, cx| this.with_tab(cx, |t, cx| t.deselect(window, cx))))
             .on_action(cx.listener(|this, _: &ListView, _, cx| this.with_tab(cx, |t, cx| t.set_view(View::List, cx))))
             .on_action(cx.listener(|this, _: &GridView, _, cx| this.with_tab(cx, |t, cx| t.set_view(View::Grid, cx))))
@@ -562,7 +597,7 @@ impl Root {
                 this.with_tab(cx, |t, cx| {
                     t.clear_search(window, cx);
                 });
-                window.focus("files");
+                this.focus_files(window, cx);
             }))
             .on_action(cx.listener(|this, _: &NewTab, window, cx| {
                 let here = this.active_tab().read(cx).location().clone();
@@ -579,42 +614,46 @@ impl Root {
                     this.activate(*n, window, cx);
                 }
             }))
-            .on_action(cx.listener(|this, _: &MoveUp, _, cx| this.step(Step::Rows(-1), false, cx)))
-            .on_action(cx.listener(|this, _: &MoveDown, _, cx| this.step(Step::Rows(1), false, cx)))
-            .on_action(cx.listener(|this, _: &ExtendUp, _, cx| this.step(Step::Rows(-1), true, cx)))
-            .on_action(cx.listener(|this, _: &ExtendDown, _, cx| this.step(Step::Rows(1), true, cx)))
-            .on_action(cx.listener(|this, _: &MoveLeft, _, cx| this.step(Step::Cells(-1), false, cx)))
-            .on_action(cx.listener(|this, _: &MoveRight, _, cx| this.step(Step::Cells(1), false, cx)))
-            .on_action(cx.listener(|this, _: &MoveHome, _, cx| this.with_tab(cx, |t, cx| t.move_to_end(false, cx))))
-            .on_action(cx.listener(|this, _: &MoveEnd, _, cx| this.with_tab(cx, |t, cx| t.move_to_end(true, cx))))
+            .on_action(cx.listener(|this, _: &MoveUp, _, cx| this.move_rows(-1, false, cx)))
+            .on_action(cx.listener(|this, _: &MoveDown, _, cx| this.move_rows(1, false, cx)))
+            .on_action(cx.listener(|this, _: &ExtendUp, _, cx| this.move_rows(-1, true, cx)))
+            .on_action(cx.listener(|this, _: &ExtendDown, _, cx| this.move_rows(1, true, cx)))
+            .on_action(
+                cx.listener(|this, _: &MoveHome, _, cx| this.with_tab(cx, |t, cx| t.move_selection(Move::Home, cx))),
+            )
+            .on_action(
+                cx.listener(|this, _: &MoveEnd, _, cx| this.with_tab(cx, |t, cx| t.move_selection(Move::End, cx))),
+            )
+            .on_action(
+                cx.listener(|this, _: &SelectAll, _, cx| this.with_tab(cx, |t, cx| t.move_selection(Move::All, cx))),
+            )
+            .on_action(cx.listener(|this, _: &MoveLeft, _, cx| this.step_sideways(-1, cx)))
+            .on_action(cx.listener(|this, _: &MoveRight, _, cx| this.step_sideways(1, cx)))
             .on_action(cx.listener(|this, TypeSelect(c): &TypeSelect, window, cx| {
                 let now = window.now();
                 this.with_tab(cx, |t, cx| t.type_select(*c, now, cx));
             }))
     }
 
-    /// Up and Down move a row of the list or a row of tiles; Left and Right move one tile and
-    /// do nothing in the list.
-    fn step(&mut self, step: Step, extend: bool, cx: &mut Context<Self>) {
-        self.with_tab(cx, |t, cx| {
-            let by = match (step, t.view()) {
-                (Step::Cells(_), _) if t.showing_results() => return,
-                (Step::Rows(n), _) if t.showing_results() => n,
-                (Step::Rows(n), View::List | View::Columns) => n,
-                (Step::Cells(n), View::Columns) => return crate::columns::step(t, n, cx),
-                (Step::Rows(n), View::Grid) => n * t.lanes() as isize,
-                (Step::Cells(n), View::Grid) => n,
-                (Step::Cells(_), View::List) => return,
-            };
-            t.move_cursor(by, extend, cx);
+    /// Left and Right: the next tile in the grid; in the columns view out to the folder above,
+    /// or into the one under the cursor.
+    fn step_sideways(&mut self, by: isize, cx: &mut Context<Self>) {
+        self.with_tab(cx, |t, cx| match t.view() {
+            _ if t.showing_results() => {}
+            View::Grid => t.move_selection(Move::By(by), cx),
+            View::Columns => crate::columns::step(t, by, cx),
+            View::List => {}
         });
     }
 }
 
-#[derive(Clone, Copy)]
-enum Step {
-    Rows(isize),
-    Cells(isize),
+/// The mouse's back and forward buttons drive the active tab's history.
+pub fn history(e: &NavigateEvent, window: &mut Window, cx: &mut App) {
+    let action: &dyn Action = match e.direction {
+        SwipeDirection::Back => &Back,
+        SwipeDirection::Forward => &Forward,
+    };
+    cx.dispatch_action(window.id(), action);
 }
 
 impl Render for Root {
@@ -630,6 +669,7 @@ impl Render for Root {
         let tabs = (self.tabs.len() > 1).then(|| self.tab_strip());
         let content = v_flex()
             .size_full()
+            .on_navigate(|e: &NavigateEvent, window, cx| history(e, window, cx))
             .children(tabs)
             .child(div().flex_1().min_h_0().child(self.active_tab().clone()))
             .child(self.status.clone())
@@ -639,7 +679,7 @@ impl Render for Root {
             .toolbar(self.toolbar(cx))
             // nd: the sidebar and inspector panes report no width change, so the session keeps
             // neither width.
-            .sidebar(sidebar().width(px(208.)).child(self.sidebar.clone()))
+            .sidebar(sidebar().width(px(232.)).child(self.sidebar.clone()))
             .content(content)
             .inspector(
                 inspector()

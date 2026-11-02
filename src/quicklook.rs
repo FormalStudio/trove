@@ -78,7 +78,7 @@ impl QuickLook {
 
     pub fn toggle(&mut self, tab: &Entity<Tab>, window: &mut Window, cx: &mut Context<Self>) {
         if self.open {
-            self.close(window, cx);
+            self.close(cx);
         } else {
             self.show(tab, window, cx);
         }
@@ -102,7 +102,9 @@ impl QuickLook {
         window.focus("quicklook");
     }
 
-    pub fn close(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    /// Focus goes back where it was when the cover opened: nd restores it as the cover's focus
+    /// scope unmounts.
+    pub fn close(&mut self, cx: &mut Context<Self>) {
         if !self.open {
             return;
         }
@@ -111,7 +113,6 @@ impl QuickLook {
         self.loader.forget();
         self.loaded = Loaded::default();
         sound::stop_unless(None, cx);
-        window.focus("files");
         cx.notify();
     }
 
@@ -145,7 +146,7 @@ impl QuickLook {
             return;
         }
         let Some(tab) = self.tab.as_ref().and_then(|t| t.upgrade()) else { return };
-        tab.update(cx, |t, cx| t.move_cursor(by, false, cx));
+        tab.update(cx, |t, cx| t.select_step(by, cx));
         let item = preview::selection(tab.read(cx)).into_iter().next();
         if item.is_some() {
             self.load(item, cx);
@@ -210,7 +211,7 @@ impl QuickLook {
             if let Some(tab) = self.tab.as_ref().and_then(|t| t.upgrade()) {
                 tab.update(cx, |t, cx| t.navigate(crate::location::Location::Dir(item.path.clone()), window, cx));
             }
-            self.close(window, cx);
+            self.close(cx);
             return;
         }
         crate::keys::open_file(&item.path, window, cx);
@@ -329,25 +330,25 @@ impl Render for QuickLook {
         };
         let position = self.position(cx);
         let (close, dismiss) = (me.clone(), me.clone());
-        let header =
-            h_flex()
-                .id("quicklook-header")
-                .w_full()
-                .h(theme.control.large)
-                .px(theme.spacing.sm)
-                .gap(theme.spacing.sm)
-                .items_center()
-                .child(icon_button("quicklook-close", Icon::X).tooltip("Close").on_click(
-                    move |_: &ClickEvent, window, cx| {
-                        let _ = close.update(cx, |q, cx| q.close(window, cx));
-                    },
-                ))
-                .child(
-                    div().flex_1().min_w_0().flex().justify_center().child(
-                        text(item.name.clone()).id("quicklook-title").font_weight(FontWeight::SEMIBOLD).truncate(),
-                    ),
-                )
-                .child(button("quicklook-open", open_label).dispatch(QuickLookOpen));
+        let header = h_flex()
+            .id("quicklook-header")
+            .w_full()
+            .h(theme.control.large)
+            .px(theme.spacing.sm)
+            .gap(theme.spacing.sm)
+            .items_center()
+            .child(icon_button("quicklook-close", Icon::X).tooltip("Close").on_click(move |_: &ClickEvent, _, cx| {
+                let _ = close.update(cx, |q, cx| q.close(cx));
+            }))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .justify_center()
+                    .child(text(item.name.clone()).id("quicklook-title").font_weight(FontWeight::SEMIBOLD).truncate()),
+            )
+            .child(button("quicklook-open", open_label).dispatch(QuickLookOpen));
         let footer = h_flex()
             .w_full()
             .px(theme.spacing.md)
@@ -384,7 +385,7 @@ impl Render for QuickLook {
             .border_1()
             .border_color(theme.border.subtle)
             .overflow_hidden()
-            .on_action(cx.listener(|this, _: &CloseQuickLook, window, cx| this.close(window, cx)))
+            .on_action(cx.listener(|this, _: &CloseQuickLook, _, cx| this.close(cx)))
             .on_action(cx.listener(|this, _: &QuickLookNext, _, cx| this.step(1, cx)))
             .on_action(cx.listener(|this, _: &QuickLookPrevious, _, cx| this.step(-1, cx)))
             .on_action(cx.listener(|this, _: &QuickLookOpen, window, cx| this.open_item(window, cx)))
@@ -398,8 +399,8 @@ impl Render for QuickLook {
             .child(
                 cover("quicklook-cover")
                     .modality(Modality::LightDismiss)
-                    .on_dismiss(move |_: &Dismissed, window, cx| {
-                        let _ = dismiss.update(cx, |q, cx| q.close(window, cx));
+                    .on_dismiss(move |_: &Dismissed, _, cx| {
+                        let _ = dismiss.update(cx, |q, cx| q.close(cx));
                     })
                     .child(div().size_full().flex().items_center().justify_center().p(theme.spacing.xl).child(card)),
             )

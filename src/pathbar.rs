@@ -9,7 +9,8 @@ use std::rc::Rc;
 use nd::prelude::*;
 use trove_fs::Volume;
 
-use crate::actions::{DRAG_FILES, DropOnto, GoTo, PATH_EDIT};
+use crate::actions::{DRAG_FILES, DropOnto, FocusFiles, GoTo, OpenPlaceInNewTab, PATH_EDIT};
+use crate::fileops::Transfer;
 use crate::icons;
 use crate::location::Location;
 use crate::pump::pump;
@@ -85,7 +86,7 @@ impl PathBar {
     pub fn cancel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.editing {
             self.editing = false;
-            window.focus("files");
+            cx.dispatch_action(window.id(), &FocusFiles);
             cx.notify();
         }
     }
@@ -102,7 +103,6 @@ impl PathBar {
         cx.notify();
         let on_go = self.on_go.clone();
         on_go(Location::Dir(path), window, cx);
-        window.focus("files");
     }
 
     /// Tab: completes the last component to the longest prefix the folder's subfolders share.
@@ -246,7 +246,7 @@ impl Render for PathBar {
         if self.editing {
             let (change, submit) = (cx.weak_entity(), cx.weak_entity());
             return h_flex()
-                .min_w(px(360.))
+                .min_w(px(200.))
                 .flex_1()
                 .child(
                     text_field(FIELD)
@@ -266,7 +266,8 @@ impl Render for PathBar {
         let segments = self.segments();
         let (shown, folded) = fold(&segments);
         let last = segments.len().saturating_sub(1);
-        let mut row = h_flex().id("pathbar").min_w(px(360.)).flex_1().items_center().gap(theme.spacing.xs);
+        let mut row =
+            h_flex().id("pathbar").min_w(px(200.)).flex_1().overflow_hidden().items_center().gap(theme.spacing.xs);
         for (n, (i, seg)) in shown.iter().enumerate() {
             if n > 0 {
                 row = row.child(icon(Icon::ChevronRight, 12.).text_color(theme.text.tertiary));
@@ -292,8 +293,13 @@ impl Render for PathBar {
                         .id("crumb-current")
                         .gap(theme.spacing.xs)
                         .px(theme.spacing.xs)
-                        .when_some(seg.icon, |d, glyph| d.child(icon(glyph, 14.).text_color(theme.text.secondary)))
-                        .child(text(seg.label.clone()).font_weight(FontWeight::SEMIBOLD).truncate()),
+                        .when_some(seg.icon, |d, glyph| d.child(icon(glyph, 16.).text_color(theme.text.primary)))
+                        .child(
+                            text(seg.label.clone())
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(theme.text.primary)
+                                .truncate(),
+                        ),
                 );
             } else {
                 let on_go = self.on_go.clone();
@@ -303,12 +309,21 @@ impl Render for PathBar {
                     b = b.icon(glyph);
                 }
                 let b = b.on_click(move |_: &ClickEvent, window, cx| on_go(to.clone(), window, cx));
-                let crumb = div().id(format!("crumb-drop-{i}")).child(b);
+                let crumb = div().id(format!("crumb-drop-{i}")).flex_shrink_0().child(b);
                 row = row.child(match seg.location.dir().map(Path::to_path_buf) {
-                    Some(dest) => crumb.accepts_drops([DRAG_FILES]).on_drop(move |e: &Dropped, window, cx| {
-                        let dragged = PathBuf::from(e.item.id.as_ref());
-                        cx.dispatch_action(window.id(), &DropOnto { dragged, dest: dest.clone() });
-                    }),
+                    Some(dest) => {
+                        let tab_dest = dest.clone();
+                        crumb
+                            .on_middle_click(move |_: &MiddleClickEvent, window, cx| {
+                                cx.dispatch_action(window.id(), &OpenPlaceInNewTab(tab_dest.clone()));
+                            })
+                            .accepts_drops([DRAG_FILES, DragItem::FILES])
+                            .on_drop(move |e: &Dropped, window, cx| {
+                                let paths = e.item.ids.iter().map(|id| PathBuf::from(id.as_ref())).collect();
+                                let mode = Transfer::from_modifiers(e.modifiers);
+                                cx.dispatch_action(window.id(), &DropOnto { paths, dest: dest.clone(), mode });
+                            })
+                    }
                     None => crumb,
                 });
             }

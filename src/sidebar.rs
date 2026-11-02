@@ -1,6 +1,7 @@
 //! The sidebar: Favourites, Bookmarks, Devices and Network as one source list. Volumes follow
-//! `watch_volumes`; a device's free space fills in when statvfs answers, and a network mount is
-//! never touched until it is opened.
+//! `watch_volumes`; a device's usage bar fills in when statvfs answers, and a network mount is
+//! never touched until it is opened. Files dropped on a place go into it, and a folder dropped
+//! between the bookmarks becomes one.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -10,7 +11,9 @@ use std::time::Duration;
 use nd::prelude::*;
 use trove_fs::{Place, PlaceIcon, Usage, Volume, VolumeKind};
 
-use crate::actions::DRAG_FILES;
+use crate::actions::{DRAG_FILES, DropOnto};
+use crate::env::is_device;
+use crate::fileops::Transfer;
 use crate::format;
 use crate::icons;
 use crate::location::Location;
@@ -37,12 +40,14 @@ pub struct Sidebar {
 impl Sidebar {
     pub fn new(on_open: impl Fn(Location, &mut Window, &mut App) + 'static, cx: &mut Context<Self>) -> Self {
         let env = crate::env::get();
-        pump(trove_fs::watch_volumes(), cx.weak_entity(), |this: &mut Sidebar, sets, cx| {
-            if let Some(volumes) = sets.into_iter().last() {
-                this.set_volumes(volumes, cx);
-            }
-            true
-        });
+        if let Some(watch) = crate::env::watch_volumes() {
+            pump(watch, cx.weak_entity(), |this: &mut Sidebar, sets, cx| {
+                if let Some(volumes) = sets.into_iter().last() {
+                    this.set_volumes(volumes, cx);
+                }
+                true
+            });
+        }
         let mut this = Self {
             places: env.places.clone(),
             bookmarks: env.bookmarks.clone(),
@@ -52,7 +57,7 @@ impl Sidebar {
             current: None,
             on_open: Rc::new(on_open),
         };
-        this.set_volumes(trove_fs::volumes(), cx);
+        this.set_volumes(crate::env::volumes(), cx);
         this
     }
 
@@ -69,19 +74,26 @@ impl Sidebar {
     }
 
     fn set_volumes(&mut self, volumes: Vec<Volume>, cx: &mut Context<Self>) {
-        for v in volumes.iter().filter(|v| is_device(v.kind) && !self.usage.contains_key(&v.mount_point)) {
-            let mount = v.mount_point.clone();
-            pump(
-                trove_fs::usage(mount.clone(), Duration::from_secs(2)),
-                cx.weak_entity(),
-                move |this: &mut Sidebar, answers, cx| {
-                    if let Some(u) = answers.into_iter().flatten().last() {
-                        this.usage.insert(mount.clone(), u);
-                        cx.notify();
-                    }
-                    false
-                },
-            );
+        let unknown: Vec<PathBuf> = volumes
+            .iter()
+            .filter(|v| is_device(v.kind) && !self.usage.contains_key(&v.mount_point))
+            .map(|v| v.mount_point.clone())
+            .collect();
+        for mount in unknown {
+            let answer = crate::env::usage(mount.clone(), Duration::from_secs(2));
+            if !crate::pump::live() {
+                if let Ok(Some(u)) = answer.try_recv() {
+                    self.usage.insert(mount, u);
+                }
+                continue;
+            }
+            pump(answer, cx.weak_entity(), move |this: &mut Sidebar, answers, cx| {
+                if let Some(u) = answers.into_iter().flatten().last() {
+                    this.usage.insert(mount.clone(), u);
+                    cx.notify();
+                }
+                false
+            });
         }
         self.volumes = volumes;
         cx.notify();
@@ -177,22 +189,31 @@ impl Sidebar {
         }
     }
 
-    /// A row dragged into the Bookmarks section becomes a bookmark when it is a folder.
-    fn dropped(&mut self, e: &Dropped, cx: &mut Context<Self>) {
-        let into_bookmarks = e.slot.as_ref().and_then(|s| s.parent.as_deref()) == Some("bookmarks")
-            || self.bookmarks.is_empty() && e.slot.is_some();
-        if e.item.kind.as_ref() != DRAG_FILES || !into_bookmarks {
+    /// Files dropped on a place go into it (into the Trash, trashed); folders dropped between
+    /// the bookmarks become bookmarks.
+    fn dropped(&mut self, e: &Dropped, window: &mut Window, cx: &mut Context<Self>) {
+        let kind = e.item.kind.as_ref();
+        if kind != DRAG_FILES && kind != DragItem::FILES {
             return;
         }
-        let path = PathBuf::from(e.item.id.as_ref());
+        let paths: Vec<PathBuf> = e.item.ids.iter().map(|id| PathBuf::from(id.as_ref())).collect();
+        if let Some(on) = e.slot.as_ref().and_then(|s| s.on.as_deref()) {
+            if let Some(Location::Dir(dest)) = self.location_of(on) {
+                let mode = Transfer::from_modifiers(e.modifiers);
+                cx.dispatch_action(window.id(), &DropOnto { paths, dest, mode });
+            }
+            return;
+        }
+        let into_bookmarks = e.slot.as_ref().and_then(|s| s.parent.as_deref()) == Some("bookmarks")
+            || self.bookmarks.is_empty() && e.slot.is_some();
+        if !into_bookmarks {
+            return;
+        }
         crate::ops::background(
             cx.weak_entity(),
-            {
-                let path = path.clone();
-                move || path.is_dir()
-            },
-            move |this, is_dir, cx| {
-                if is_dir {
+            move || paths.into_iter().filter(|p| p.is_dir()).collect::<Vec<_>>(),
+            move |this, folders, cx| {
+                for path in folders {
                     this.add_bookmark(path, cx);
                 }
             },
@@ -203,6 +224,11 @@ impl Sidebar {
         let Some(mount) = id.strip_prefix("volume:").map(PathBuf::from) else { return };
         let Some(volume) = self.volumes.iter().find(|v| v.mount_point == mount).cloned() else { return };
         self.eject_errors.remove(&mount);
+        if crate::env::get().demo {
+            self.volumes.retain(|v| v.mount_point != mount);
+            cx.notify();
+            return;
+        }
         pump(trove_fs::unmount(&volume), cx.weak_entity(), move |this: &mut Sidebar, results, cx| {
             if let Some(Err(why)) = results.into_iter().last() {
                 this.eject_errors.insert(mount.clone(), why);
@@ -241,8 +267,11 @@ impl Sidebar {
                     .parent(section);
                 if let Some(why) = self.eject_errors.get(&v.mount_point) {
                     node = node.caption(why.clone());
-                } else if let Some(u) = self.usage.get(&v.mount_point) {
-                    node = node.caption(format!("{} free of {}", format::size(u.free), format::size(u.total)));
+                } else if let Some(u) = self.usage.get(&v.mount_point).filter(|u| u.total > 0) {
+                    // nd: source rows share one fixed pitch, so a caption over a meter runs
+                    // into the next row; the free space sits beside the name instead.
+                    let used = u.total.saturating_sub(u.free) as f64 / u.total as f64;
+                    node = node.badge(format!("{} free", format::size(u.free))).meter(used as f32);
                 }
                 if ejectable(v.kind) {
                     node = node.actions([EJECT]);
@@ -252,10 +281,6 @@ impl Sidebar {
         }
         nodes
     }
-}
-
-fn is_device(kind: VolumeKind) -> bool {
-    matches!(kind, VolumeKind::Root | VolumeKind::Internal | VolumeKind::Removable | VolumeKind::Phone)
 }
 
 fn ejectable(kind: VolumeKind) -> bool {
@@ -284,10 +309,10 @@ impl Render for Sidebar {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let (open, act, drop) = (cx.weak_entity(), cx.weak_entity(), cx.weak_entity());
         let place = self.menu_place();
-        // nd: source_tree has no per-row context menu and takes drops only between rows
-        // (`Dropped.slot`), so the menu acts on the row the active tab shows and a file
-        // dropped on a place cannot be moved into it.
+        // nd: source_tree rows take no context menu and no middle click of their own, so the
+        // menu acts on the row the active tab shows and a middle click opens nothing.
         let tree = source_tree("places")
+            .size_full()
             .nodes(self.nodes())
             .actions([source_action(EJECT, icons::eject()).tooltip("Eject")])
             .selected_opt(self.current.as_ref().and_then(|l| self.id_for(l)))
@@ -302,13 +327,15 @@ impl Render for Sidebar {
                     let _ = act.update(cx, |this, cx| this.eject(&e.id, cx));
                 }
             })
-            .accepts_drops([DRAG_FILES])
-            .on_drop(move |e: &Dropped, _, cx| {
-                let _ = drop.update(cx, |this, cx| this.dropped(e, cx));
+            .accepts_drops([DRAG_FILES, DragItem::FILES])
+            .drops_onto_rows()
+            .on_drop(move |e: &Dropped, window, cx| {
+                let _ = drop.update(cx, |this, cx| this.dropped(e, window, cx));
             });
         div()
             .id("places-menu")
             .size_full()
+            .on_navigate(|e: &NavigateEvent, window, cx| crate::root::history(e, window, cx))
             .child(tree)
             .context_menu(move |menu, _, _| menus::sidebar(menu, place.as_ref()))
     }

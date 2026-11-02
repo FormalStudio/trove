@@ -11,7 +11,10 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use nd::components::services::{AlertCallback, Chrome, ChromeServices, OpenCallback, SaveCallback};
-use nd::components::{Alert, AlertResponse, ContextMenu, ContextMenuRequested, Menu, MenuItem, OpenDialog, SaveDialog};
+use nd::components::{
+    Alert, AlertResponse, ContextMenu, ContextMenuRequested, Menu, MenuItem, OpenDialog, SaveDialog, TextCancelled,
+    TextEditingEnded,
+};
 use nd::core::{NodeId, WindowId};
 use nd::prelude::*;
 use nd::test::{Size, TestApp, by_test_id};
@@ -153,9 +156,24 @@ impl Harness {
         names
     }
 
+    fn node(&mut self, test_id: &str) -> NodeId {
+        let id = self.window.id();
+        by_test_id(&mut self.cx, id, test_id)
+            .unwrap_or_else(|| panic!("no `{test_id}` in\n{}", self.cx.semantic_tree().snapshot()))
+            .id
+    }
+
+    /// Return in the rename field, or focus leaving it: both end the edit with its text.
     fn rename_to(&mut self, text: &str) {
-        self.tab().update(&mut self.cx, |t, cx| t.set_rename_text(text.into(), cx));
-        self.act(CommitRename);
+        let field = self.node(trove::RENAME_FIELD);
+        self.cx.emit(field, TextEditingEnded { text: text.to_owned().into() });
+        self.settle();
+    }
+
+    fn cancel_rename(&mut self) {
+        let field = self.node(trove::RENAME_FIELD);
+        self.cx.emit(field, TextCancelled);
+        self.settle();
     }
 
     fn renaming(&self) -> Option<trove::Rename> {
@@ -206,8 +224,9 @@ fn rename_inline_commits_cancels_and_reports_errors() {
     let r = h.renaming().expect("renaming");
     assert_eq!(r.text.as_ref(), "notes.txt");
 
-    h.act(CancelRename);
+    h.cancel_rename();
     assert!(h.renaming().is_none());
+    assert_eq!(h.on_disk(), ["notes.txt", "taken.txt"]);
 
     h.act(Rename);
     h.rename_to("notes.txt");

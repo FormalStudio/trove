@@ -7,6 +7,8 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
+use trove_fs::{Usage, Volume, VolumeKind};
+
 pub fn enabled() -> bool {
     std::env::var_os("TROVE_DEMO").is_some_and(|v| !v.is_empty() && v != "0")
 }
@@ -98,6 +100,46 @@ const FILES: &[(&str, u64, When)] = &[
     (".config/settings.toml", 220, When::At(JULY)),
 ];
 
+/// Folder name, label, file system, kind, and total and free bytes.
+type VolumeRow = (&'static str, &'static str, &'static str, VolumeKind, Option<(u64, u64)>);
+
+/// The demo's mounts, in a folder beside the fixture so none of them sits inside Home: a system
+/// disk, a removable backup drive and a network share, with fixed free space. The share has
+/// none, as a network mount is never asked until it is opened.
+const VOLUMES: &[VolumeRow] = &[
+    ("System", "", "ext4", VolumeKind::Root, Some((512_000_000_000, 187_400_000_000))),
+    ("Backup", "Backup", "exfat", VolumeKind::Removable, Some((1_000_000_000_000, 612_000_000_000))),
+    ("NAS", "Studio NAS", "nfs4", VolumeKind::Network, None),
+];
+
+/// What each volume holds, so opening one shows a folder.
+const VOLUME_DIRS: &[&str] =
+    &["System/etc", "System/usr", "System/var", "Backup/Photos 2025", "Backup/Projects", "NAS/Shared", "NAS/Media"];
+
+fn volumes_dir(root: &Path) -> PathBuf {
+    let name = root.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "trove-demo".to_owned());
+    root.with_file_name(format!("{name}-volumes"))
+}
+
+/// The demo's fixed volume list for the fixture at `root`.
+pub fn volumes(root: &Path) -> Vec<(Volume, Option<Usage>)> {
+    let dir = volumes_dir(root);
+    VOLUMES
+        .iter()
+        .map(|(name, label, fs, kind, usage)| {
+            let volume = Volume {
+                mount_point: dir.join(name),
+                device: format!("demo-{}", name.to_lowercase()),
+                fs_type: (*fs).to_owned(),
+                label: (*label).to_owned(),
+                kind: *kind,
+                read_only: false,
+            };
+            (volume, usage.map(|(total, free)| Usage { total, free }))
+        })
+        .collect()
+}
+
 /// Builds or refreshes the fixture and returns its root.
 pub fn ensure() -> io::Result<PathBuf> {
     ensure_at(root())
@@ -107,6 +149,10 @@ pub fn ensure() -> io::Result<PathBuf> {
 pub fn ensure_at(root: PathBuf) -> io::Result<PathBuf> {
     for dir in DIRS {
         fs::create_dir_all(root.join(dir))?;
+    }
+    let volumes = volumes_dir(&root);
+    for dir in VOLUME_DIRS {
+        fs::create_dir_all(volumes.join(dir))?;
     }
     let midnight = local_midnight();
     for (rel, size, when) in FILES {

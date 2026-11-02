@@ -59,6 +59,27 @@ impl Harness {
         self.tab().read(&self.cx).selected_names()
     }
 
+    /// What a click, a Shift range or a key in the list `test_id` reports: `names` selected,
+    /// the cursor on `cursor`.
+    fn pick(&mut self, test_id: &str, names: &[&str], cursor: Option<&str>) {
+        let tab = self.tab();
+        let (rows, cursor) = {
+            let t = tab.read(&self.cx);
+            let state = t.list_state();
+            let row = |name: &str| {
+                let id = t.visible().iter().find(|id| t.entry(id).is_some_and(|e| e.name.as_ref() == name));
+                id.and_then(|id| state.row_of(id)).unwrap_or_else(|| panic!("no row {name}"))
+            };
+            (names.iter().map(|n| row(n)).collect::<Vec<_>>(), cursor.map(row))
+        };
+        let id = self.window.id();
+        let node = nd::test::by_test_id(&mut self.cx, id, test_id)
+            .unwrap_or_else(|| panic!("no `{test_id}` in\n{}", self.cx.semantic_tree().snapshot()))
+            .id;
+        self.cx.emit(node, nd::virtual_list::RowsSelected { rows, cursor });
+        self.settle();
+    }
+
     fn location(&self) -> Location {
         self.tab().read(&self.cx).location().clone()
     }
@@ -121,7 +142,7 @@ fn open_folder_and_into_folder() {
     assert_eq!(h.selected(), ["Music"]);
     h.act(Open);
     assert_eq!(h.location(), Location::Dir(Harness::demo("Music")));
-    h.act(MoveDown);
+    h.pick("files-table", &["Album"], Some("Album"));
     assert_eq!(h.selected(), ["Album"]);
     h.act(IntoFolder);
     assert_eq!(h.names()[0], "01 Opening.flac");
@@ -215,21 +236,62 @@ fn type_select_builds_a_prefix() {
 }
 
 #[test]
-fn keyboard_selection_and_select_all() {
+fn the_list_owns_the_selection_and_the_cursor() {
+    let mut h = Harness::new();
+    h.pick("files-table", &["Documents", "Downloads"], Some("Documents"));
+    assert_eq!(h.selected(), ["Documents", "Downloads"]);
+    let cursor = h.tab().read(&h.cx).cursor();
+    assert_eq!(
+        cursor.and_then(|c| h.tab().read(&h.cx).entry(&c).map(|e| e.name.to_string())).as_deref(),
+        Some("Documents")
+    );
+    h.act(Open);
+    assert_eq!(h.location(), Location::Dir(Harness::demo("Documents")), "Return opens the cursor's row");
+
+    h.act(Back);
+    h.pick("files-table", ROOT_NAMES, None);
+    let (left, _) = h.root().read(&h.cx).status().read(&h.cx).summary(&h.cx);
+    assert!(left.starts_with("10 items \u{b7} 10 selected ("), "{left}");
+    h.pick("files-table", &[], None);
+    assert!(h.selected().is_empty(), "a click on empty space clears it");
+    assert_eq!(h.tab().read(&h.cx).cursor(), None);
+
+    h.pick("files-table", &["Music"], Some("Music"));
+    h.act(Deselect);
+    assert!(h.selected().is_empty());
+}
+
+#[test]
+fn keys_move_the_selection_until_the_list_is_pressed() {
     let mut h = Harness::new();
     h.act(MoveDown);
     assert_eq!(h.selected(), ["Desktop"]);
     h.act(MoveDown);
     h.act(ExtendDown);
     assert_eq!(h.selected(), ["Documents", "Downloads"]);
+    h.act(ExtendUp);
+    assert_eq!(h.selected(), ["Documents"], "Shift and the other arrow shrinks the range back");
     h.act(MoveEnd);
     assert_eq!(h.selected(), ["todo.txt"]);
+    h.act(MoveDown);
+    assert_eq!(h.selected(), ["todo.txt"], "the last row stays put");
+    h.act(MoveHome);
+    assert_eq!(h.selected(), ["Desktop"]);
     h.act(SelectAll);
     assert_eq!(h.selected().len(), ROOT_NAMES.len());
-    let (left, _) = h.root().read(&h.cx).status().read(&h.cx).summary(&h.cx);
-    assert!(left.starts_with("10 items \u{b7} 10 selected ("), "{left}");
     h.act(Deselect);
     assert!(h.selected().is_empty());
+}
+
+#[test]
+fn the_grid_and_columns_select_through_their_own_lists() {
+    let mut h = Harness::new();
+    h.act(GridView);
+    h.pick("files-grid", &["Pictures"], Some("Pictures"));
+    assert_eq!(h.selected(), ["Pictures"]);
+    h.act(trove::keys::ColumnsView);
+    h.pick("files-columns", &["Videos"], Some("Videos"));
+    assert_eq!(h.selected(), ["Videos"]);
 }
 
 #[test]
@@ -292,4 +354,13 @@ fn the_sidebar_opens_recent_newest_first() {
     assert_eq!(h.names().len(), 5);
     assert_eq!(h.names()[0], "Quarterly report.docx");
     assert_eq!(h.tab().read(&h.cx).title(), "Recent");
+}
+
+#[test]
+fn ctrl_f_focuses_the_search_field() {
+    let mut h = Harness::new();
+    h.act(FocusSearch);
+    let window = h.window.id();
+    let field = nd::test::by_test_id(&mut h.cx, window, "search").expect("a search field");
+    assert!(field.focused, "{}", h.cx.semantic_tree().snapshot());
 }
