@@ -274,6 +274,10 @@ impl Preview {
         self.follow(tab, cx);
     }
 
+    pub fn width(&self) -> f32 {
+        self.width
+    }
+
     pub fn set_width(&mut self, width: f32, cx: &mut Context<Self>) {
         if (self.width - width).abs() >= 0.5 {
             self.width = width;
@@ -450,6 +454,8 @@ pub const PANE_ART: f32 = 190.;
 
 /// The pane's width until the user drags it.
 pub const PANE_W: f32 = 260.;
+/// The least the pane narrows to, by a drag or for a narrow window.
+pub const PANE_MIN: f32 = 220.;
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum Scale {

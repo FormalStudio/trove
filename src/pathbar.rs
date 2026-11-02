@@ -267,7 +267,7 @@ impl Render for PathBar {
         let (shown, folded) = fold(&segments);
         let last = segments.len().saturating_sub(1);
         let mut row =
-            h_flex().id("pathbar").min_w(px(200.)).flex_1().overflow_hidden().items_center().gap(theme.spacing.xs);
+            h_flex().id("pathbar").min_w(px(120.)).flex_1().overflow_hidden().items_center().gap(theme.spacing.xs);
         for (n, (i, seg)) in shown.iter().enumerate() {
             if n > 0 {
                 row = row.child(icon(Icon::ChevronRight, 12.).text_color(theme.text.tertiary));

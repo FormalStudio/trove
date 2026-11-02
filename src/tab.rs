@@ -33,7 +33,8 @@ const TYPE_SELECT_WINDOW: f64 = 0.8;
 const SIZE_W: f32 = 96.;
 const KIND_W: f32 = 132.;
 const DATE_W: f32 = 168.;
-const NAME_MIN: f32 = 220.;
+const NAME_MIN: f32 = 200.;
+const NAME_MAX: f32 = 560.;
 /// What a still-unmeasured content area is taken to be on the first frame.
 const DEFAULT_WIDTH: f32 = 760.;
 const ORIGIN_W: f32 = 220.;
@@ -855,8 +856,18 @@ impl Tab {
 
     /// The table's columns by id, in order: a trash shows where each item came from and when
     /// it was deleted instead of its kind and date.
+    /// A narrow pane drops Kind, then Size, before the names get too short to read.
     fn column_ids(&self) -> &'static [&'static str] {
-        if self.in_trash { &["name", "origin", "deleted", "size"] } else { &["name", "size", "kind", "modified"] }
+        if self.in_trash {
+            return &["name", "origin", "deleted", "size"];
+        }
+        if self.width - SIZE_W - KIND_W - DATE_W >= NAME_MIN {
+            &["name", "size", "kind", "modified"]
+        } else if self.width - SIZE_W - DATE_W >= NAME_MIN {
+            &["name", "size", "modified"]
+        } else {
+            &["name", "modified"]
+        }
     }
 
     fn columns(&self) -> Vec<Column> {
@@ -875,20 +886,31 @@ impl Tab {
                 col("size", "Size", SortKey::Size, SIZE_W),
             ];
         }
-        vec![
-            col("name", "Name", SortKey::Name, self.name_width()),
-            col("size", "Size", SortKey::Size, SIZE_W),
-            col("kind", "Kind", SortKey::Kind, KIND_W),
-            col("modified", "Modified", SortKey::Modified, DATE_W),
-        ]
-    }
-
-    fn name_width(&self) -> f32 {
-        (self.width - SIZE_W - KIND_W - DATE_W).max(NAME_MIN)
+        let ids = self.column_ids();
+        let rest: f32 = ids
+            .iter()
+            .map(|id| match *id {
+                "size" => SIZE_W,
+                "kind" => KIND_W,
+                "modified" => DATE_W,
+                _ => 0.,
+            })
+            .sum();
+        // Past NAME_MAX the names stop growing and the last column takes the rest, as in
+        // Finder, so a wide window keeps the details beside the names.
+        let name = (self.width - rest).clamp(NAME_MIN, NAME_MAX);
+        let last = (self.width - rest - name).max(0.);
+        ids.iter()
+            .map(|id| match *id {
+                "size" => col("size", "Size", SortKey::Size, SIZE_W),
+                "kind" => col("kind", "Kind", SortKey::Kind, KIND_W),
+                "modified" => col("modified", "Modified", SortKey::Modified, DATE_W + last),
+                _ => col("name", "Name", SortKey::Name, name),
+            })
+            .collect()
     }
 
     fn cell(&mut self, id: EntryId, col: usize, _window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
-        let theme = cx.theme();
         let Some(e) = self.entry(&id) else { return div().into_any_element() };
         let col_id = self.column_ids().get(col).copied().unwrap_or("name");
         if col_id == "name"
@@ -896,15 +918,10 @@ impl Tab {
         {
             return self.rename_field(r, false, cx);
         }
+        let thumb = if col_id == "name" { crate::thumbs::for_entry(self.path_of(&id), e, cx) } else { None };
+        let theme = cx.theme();
         let info = self.trash_info.get(&id);
-        let quiet = |s: String| {
-            text(s)
-                .text_size(theme.type_scale.footnote)
-                .text_color(theme.text.secondary)
-                .tabular_nums()
-                .truncate()
-                .into_any_element()
-        };
+        let quiet = |s: String| text(s).text_color(theme.text.secondary).tabular_nums().truncate().into_any_element();
         let content = match col_id {
             "name" => {
                 let symlinked = matches!(e.kind, EntryKind::Symlink { .. }) && e.is_dir();
@@ -912,15 +929,13 @@ impl Tab {
                 h_flex()
                     .gap(theme.spacing.sm)
                     .min_w_0()
-                    .child(icon(glyph, 16.).text_color(icons::tint(e.file_kind, theme)))
+                    .child(crate::thumbs::row_art(thumb, glyph, icons::tint(e.file_kind, theme), theme))
                     .child(div().flex_1().min_w_0().child(
                         text(e.name.to_string()).truncate().when(e.hidden, |t| t.text_color(theme.text.secondary)),
                     ))
                     .into_any_element()
             }
-            "size" if e.is_dir() && e.meta.as_ref().and_then(|m| m.child_count).is_none() => {
-                text("--").text_size(theme.type_scale.footnote).text_color(theme.text.secondary).into_any_element()
-            }
+            "size" if e.is_dir() && e.meta.as_ref().and_then(|m| m.child_count).is_none() => quiet("--".to_owned()),
             "size" => quiet(size_text(e)),
             "kind" => quiet(e.file_kind.label().to_owned()),
             "origin" => quiet(info.and_then(|i| i.origin.as_ref()).map(|p| self.place_label(p)).unwrap_or_default()),
@@ -935,7 +950,6 @@ impl Tab {
             .h(px(ROW_HEIGHT))
             .px(theme.spacing.sm)
             .items_center()
-            .when(col_id == "size", |d| d.justify_end())
             .when(self.cut.contains(&id), |d| d.opacity(0.5))
             .child(content);
         self.file_events(row, id, cx).into_any_element()

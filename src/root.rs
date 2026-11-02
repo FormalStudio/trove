@@ -23,6 +23,10 @@ const TAB_W: f32 = 220.;
 const ADD_W: f32 = 44.;
 /// The sidebar's width until the user drags it.
 const SIDEBAR_W: f32 = 232.;
+/// The least the files get beside the preview pane while the pane can still narrow.
+const FILES_MIN: f32 = 440.;
+/// The header over the files keeps its search field from this width up.
+const SEARCH_ROOM: f32 = 620.;
 
 /// Where the first tab opens.
 #[derive(Clone, Debug, PartialEq)]
@@ -151,8 +155,6 @@ impl Root {
             let id = this.take_id();
             this.tabs.push((id, tab));
         }
-        let preview_w = this.preview_w;
-        this.preview.update(cx, |p, cx| p.set_width(preview_w, cx));
         this.register_drops();
         this.activate(active, window, cx);
         this
@@ -554,24 +556,38 @@ impl Root {
         let (can_back, can_forward) = chrome.as_ref().map_or((false, false), |c| (c.can_back, c.can_forward));
         let title = chrome.as_ref().map(|c| c.title.clone()).unwrap_or_default();
         let search = self.active_tab().read(cx).search().clone();
-        toolbar()
+        let field =
+            search_field("search", &search).placeholder(format!("Search {title}")).key_context(SEARCH).w(px(240.));
+        let toolbar = toolbar()
             .hide_title()
             .navigation(icon_button("back", Icon::ChevronLeft).tooltip("Back").disabled(!can_back).dispatch(Back))
             .navigation(
                 icon_button("forward", Icon::ChevronRight).tooltip("Forward").disabled(!can_forward).dispatch(Forward),
             )
-            .item(self.pathbar.clone())
-            .flexible_space()
-            .item(self.view_switch())
-            .persistent_search(
-                search_field("search", &search).placeholder(format!("Search {title}")).key_context(SEARCH).w(px(240.)),
-            )
-            .item(
-                icon_button("preview-toggle", Icon::PanelRight)
-                    .tooltip("Preview")
-                    .checked(self.show_preview)
-                    .dispatch(TogglePreview),
-            )
+            .flexible_item(self.pathbar.clone())
+            .item(self.view_switch());
+        // A header too narrow for the field keeps libadwaita's search toggle instead, its bar
+        // opening under the header (Ctrl+F opens it too).
+        let toolbar =
+            if self.files_w() >= SEARCH_ROOM { toolbar.persistent_search(field) } else { toolbar.item(field) };
+        toolbar.item(
+            icon_button("preview-toggle", Icon::PanelRight)
+                .tooltip("Preview")
+                .checked(self.show_preview)
+                .dispatch(TogglePreview),
+        )
+    }
+
+    /// The preview pane's width as drawn: it gives up its own width, down to its least, before
+    /// the files beside it go under [`FILES_MIN`].
+    fn shown_preview_w(&self) -> f32 {
+        self.preview_w.min((self.size.0 - self.sidebar_w - FILES_MIN).max(crate::preview::PANE_MIN))
+    }
+
+    /// The width the files and their header bar get between the sidebar and the preview pane.
+    fn files_w(&self) -> f32 {
+        let preview = if self.show_preview { self.shown_preview_w() } else { 0. };
+        self.size.0 - self.sidebar_w - preview
     }
 
     fn actions(&self, root: Scaffold, cx: &mut Context<Self>) -> Scaffold {
@@ -685,6 +701,10 @@ impl Render for Root {
             self.size = size;
             self.save_session(cx);
         }
+        let preview_w = self.shown_preview_w();
+        if self.preview.read(cx).width() != preview_w {
+            self.preview.update(cx, |p, cx| p.set_width(preview_w, cx));
+        }
         let tabs = (self.tabs.len() > 1).then(|| self.tab_strip());
         let content = v_flex()
             .size_full()
@@ -713,12 +733,11 @@ impl Render for Root {
             .inspector(
                 inspector()
                     .resizable()
-                    .min_w(px(220.))
+                    .min_w(px(crate::preview::PANE_MIN))
                     .max_w(px(480.))
-                    .width(px(self.preview_w))
+                    .width(px(preview_w))
                     .on_resize(cx.listener(|this, e: &nd::components::PaneResized, _, cx| {
                         this.preview_w = e.width;
-                        this.preview.update(cx, |p, cx| p.set_width(e.width, cx));
                         this.save_session(cx);
                         cx.notify();
                     }))

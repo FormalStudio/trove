@@ -333,7 +333,12 @@ index is over 5 minutes old a query also walks its scope 3 levels deep to catch 
   by their edges.
 - List view: a `table` with Name, Size, Kind, Modified (Created optional), sortable, folders
   first, natural order, folders expandable inline (disclosure, Right/Left keys) like Finder.
+  Rows carry the file's thumbnail in place of its icon once it exists. Names stop widening at
+  560 so the details stay beside them; a narrow pane drops Kind, then Size.
 - Grid view: icons with thumbnails, filled in as they arrive.
+- Header: the path bar gives its room back first; under 620 of header over the files the
+  search field folds into libadwaita's toggle (Ctrl+F opens its bar), and the preview pane
+  narrows to 220 before the files go under 440.
 - Columns view: Finder's Miller columns, one `list` per level, the last column the preview,
   scrolling sideways to keep the active column in view.
 - Preview pane: the selection's preview and its info, loaded 60 ms after the selection settles;

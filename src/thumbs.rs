@@ -176,14 +176,20 @@ impl Thumbs {
     }
 }
 
-/// The picture of a grid tile: the thumbnail once it exists, the kind's icon until then.
-pub fn tile_art(path: Option<PathBuf>, e: &Entry, lit: bool, cx: &mut Context<Tab>) -> AnyElement {
+/// The thumbnail of a listed file once it is made, asked for the first time a row or tile
+/// showing it is drawn.
+pub fn for_entry(path: Option<PathBuf>, e: &Entry, cx: &mut App) -> Option<PathBuf> {
     let mtime = e.meta.as_ref().and_then(|m| m.modified);
-    let thumb = path.and_then(|p| {
+    path.and_then(|p| {
         let network = crate::settings::get(cx).network_thumbnails;
         let thumbs = get(cx);
         thumbs.update(cx, |t, _| t.lookup(&p, e.file_kind, mtime, network))
-    });
+    })
+}
+
+/// The picture of a grid tile: the thumbnail once it exists, the kind's icon until then.
+pub fn tile_art(path: Option<PathBuf>, e: &Entry, lit: bool, cx: &mut Context<Tab>) -> AnyElement {
+    let thumb = for_entry(path, e, cx);
     let theme = cx.theme();
     let art = match thumb {
         Some(thumb) => image(ImageSource::path(&thumb))
@@ -204,6 +210,20 @@ pub fn tile_art(path: Option<PathBuf>, e: &Entry, lit: bool, cx: &mut Context<Ta
         .child(art);
     div().flex_1().w_full().flex().items_center().justify_center().child(plate).into_any_element()
 }
+
+/// The picture at the head of a list row: the thumbnail in the glyph's box once it exists.
+pub fn row_art(thumb: Option<PathBuf>, glyph: Icon, tint: Hsla, theme: &Theme) -> AnyElement {
+    let art = match thumb {
+        Some(thumb) => {
+            image(ImageSource::path(&thumb)).contain().size(px(ROW_ART)).rounded(theme.radius.sm).into_any_element()
+        }
+        None => icon(glyph, 16.).text_color(tint).into_any_element(),
+    };
+    div().size(px(ROW_ART)).flex_none().flex().items_center().justify_center().child(art).into_any_element()
+}
+
+/// The box a list row's picture takes.
+const ROW_ART: f32 = 20.;
 
 /// The box a tile's picture takes inside the tile.
 const ART: (f32, f32) = (88., 60.);
