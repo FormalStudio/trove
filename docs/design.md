@@ -172,8 +172,8 @@ landed. Files are copied in 1 MiB steps with `copy_file_range` (a `FICLONE` refl
 read/write loop if the kernel refuses), checking for cancel between steps; a cancelled copy
 removes the partial file it was writing and nothing else. mtime, atime and permission bits are
 kept and symlinks are copied as symlinks. Fifos, sockets and device nodes are not copied: a move
-across file systems leaves a source holding any in place and fails with "Left 2 special files in
-place". Progress is throttled to about 20 events a second,
+across file systems copies the rest, keeps every source holding any, and fails saying the
+originals were kept. Progress is throttled to about 20 events a second,
 and a quick pre-walk (which reports too) fills in the totals. Copying or duplicating into the
 folder the source lives in makes "name copy.ext", "name copy 2.ext" with no prompt. Any other
 name clash is a conflict: KeepBoth picks "name 2.ext". Replace on a file overwrites it (through

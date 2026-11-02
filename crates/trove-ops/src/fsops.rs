@@ -140,8 +140,10 @@ pub(crate) fn transfer(ctx: &mut Ctx, mode: Mode, items: &[(PathBuf, PathBuf)]) 
 fn left_in_place(ctx: &Ctx) -> R<()> {
     match ctx.skipped {
         0 => Ok(()),
-        1 => fail("Left 1 special file in place"),
-        n => fail(format!("Left {n} special files in place")),
+        1 => fail("Copied, but kept the originals: they hold a pipe, socket or device that cannot be moved"),
+        n => fail(format!(
+            "Copied, but kept the originals: they hold {n} pipes, sockets or devices that cannot be moved"
+        )),
     }
 }
 
@@ -489,7 +491,11 @@ pub(crate) fn rename(ctx: &mut Ctx, path: &Path, new_name: &str) -> R<()> {
         return Ok(());
     }
     let renamed = match fs::symlink_metadata(&target) {
-        Ok(tm) if tm.dev() == m.dev() && tm.ino() == m.ino() => fs::rename(path, &target),
+        // Same inode under a name differing only in case is a case-insensitive file system; a hard
+        // link under another name is a different file, and rename(2) between links does nothing.
+        Ok(tm) if tm.dev() == m.dev() && tm.ino() == m.ino() && name_of(path).to_lowercase() == name.to_lowercase() => {
+            fs::rename(path, &target)
+        }
         Ok(_) => return fail(format!("\"{name}\" already exists")),
         Err(_) => rename_noreplace(path, &target),
     };
@@ -641,7 +647,10 @@ mod tests {
         let (mut c, _rx) = ctx();
         c.force_exdev = true;
         match transfer(&mut c, Mode::Move, &[(src.clone(), out.clone())]) {
-            Err(Stop::Failed(msg)) => assert_eq!(msg, "Left 1 special file in place"),
+            Err(Stop::Failed(msg)) => assert_eq!(
+                msg,
+                "Copied, but kept the originals: they hold a pipe, socket or device that cannot be moved"
+            ),
             other => panic!("expected a failure, got {other:?}"),
         }
         assert!(fs::symlink_metadata(src.join("pipe")).unwrap().file_type().is_fifo());
@@ -659,6 +668,18 @@ mod tests {
         assert!(matches!(move_entry(&mut c, &a, &b, false), Err(Stop::Failed(m)) if m.contains("already exists")));
         assert_eq!(fs::read_to_string(&b).unwrap(), "b");
         assert!(a.exists());
+    }
+
+    #[test]
+    fn renaming_onto_a_hard_link_of_itself_is_refused() {
+        let d = tempfile::tempdir().unwrap();
+        let (a, b) = (d.path().join("a"), d.path().join("b"));
+        fs::write(&a, "a").unwrap();
+        fs::hard_link(&a, &b).unwrap();
+        let (mut c, _rx) = ctx();
+        assert!(matches!(rename(&mut c, &a, "b"), Err(Stop::Failed(m)) if m.contains("already exists")));
+        assert!(a.exists() && b.exists());
+        assert!(c.pairs.is_empty());
     }
 
     #[test]
