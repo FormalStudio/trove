@@ -15,6 +15,9 @@ pub struct Env {
     pub bookmarks: Vec<Place>,
     /// Recent's paths, fixed for the demo; `None` reads the system's list when asked.
     pub recent: Option<Vec<PathBuf>>,
+    /// The demo fixture: nothing outside its root is written (no bookmarks file, no
+    /// mimeapps.list, no volume trashes).
+    pub demo: bool,
 }
 
 static ENV: OnceLock<Env> = OnceLock::new();
@@ -46,6 +49,7 @@ pub fn use_demo(root: &Path) -> bool {
             Place { label: "Holiday".into(), path: at("Pictures/Holiday"), icon: PlaceIcon::Folder },
         ],
         recent: Some(crate::demo::RECENT.iter().map(|p| at(p)).collect()),
+        demo: true,
     };
     ENV.set(env).is_ok()
 }
@@ -57,6 +61,7 @@ fn system() -> Env {
         places: trove_fs::user_dirs(),
         bookmarks: trove_fs::bookmarks(),
         recent: None,
+        demo: false,
         home,
     }
 }

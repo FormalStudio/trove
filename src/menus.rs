@@ -1,0 +1,161 @@
+//! The context menus: on files, on a folder's empty space, on the sidebar and on the tab strip.
+//! Every item is an action, so a menu item, its key and its toolbar button never disagree; the
+//! items act on the selection, which a right click on an unselected row moves to that row first.
+
+use std::path::PathBuf;
+
+use nd::prelude::*;
+use trove_fs::SortKey;
+
+use crate::actions::*;
+use crate::tab::View;
+
+/// What a menu on files acts on, read from the tab when the menu opens.
+#[derive(Clone, Debug, Default)]
+pub struct Target {
+    pub paths: Vec<PathBuf>,
+    pub folders: usize,
+    /// The one archive selected, for Extract here.
+    pub archive: bool,
+    /// The listing is a trash.
+    pub in_trash: bool,
+    /// The listing is Recent, which has no folder to paste into.
+    pub recent: bool,
+}
+
+/// The menu on a selection of files and folders.
+pub fn files(menu: ContextMenu, t: &Target, cx: &mut App) -> ContextMenu {
+    let one_folder = t.paths.len() == 1 && t.folders == 1;
+    let files_only = t.folders == 0 && !t.paths.is_empty();
+    let mut menu = menu.item("Open", Open);
+    if one_folder {
+        menu = menu.item("Open in new tab", OpenInNewTab);
+    }
+    if files_only && !t.in_trash {
+        menu = menu.submenu(open_with(t, cx));
+    }
+    menu = menu.separator();
+    if t.in_trash {
+        return menu
+            .item("Restore", Restore)
+            .item("Copy path", CopyPath)
+            .separator()
+            .item_destructive("Delete permanently", DeletePermanently);
+    }
+    menu = menu.item("Cut", Cut).item("Copy", Copy);
+    if one_folder {
+        menu = menu.item("Paste into folder", PasteInto);
+    }
+    menu = menu.item("Duplicate", Duplicate);
+    if t.paths.len() == 1 {
+        menu = menu.item("Rename\u{2026}", Rename);
+    }
+    menu = menu.separator().item("Compress", Compress);
+    if t.archive {
+        menu = menu.item("Extract here", ExtractHere);
+    }
+    menu = menu.item("Copy path", CopyPath);
+    if one_folder {
+        menu = menu.item("Add to bookmarks", AddBookmark);
+    }
+    menu.separator().item_destructive("Move to Trash", Trash)
+}
+
+/// "Open with": the apps for the first file's type, the default first, then a submenu that
+/// makes another one the default.
+fn open_with(t: &Target, cx: &mut App) -> Menu {
+    let mut menu = Menu::new("Open with");
+    let Some(first) = t.paths.first() else { return menu };
+    let Some(apps) = crate::ops::apps_for(cx, first) else {
+        return menu.item(MenuItem::action("Looking for apps\u{2026}", OpenWith(String::new())).enabled(false));
+    };
+    if apps.is_empty() {
+        return menu.item(MenuItem::action("No apps for this type", OpenWith(String::new())).enabled(false));
+    }
+    for (i, app) in apps.iter().enumerate() {
+        let label = if i == 0 { format!("{} (default)", app.name) } else { app.name.clone() };
+        menu = menu.item(MenuItem::action(label, OpenWith(app.id.clone())));
+    }
+    if apps.len() > 1 && !crate::env::get().demo {
+        let mut set = Menu::new("Set as default");
+        for app in &apps[1..] {
+            set = set.item(MenuItem::action(app.name.clone(), SetDefaultApp(app.id.clone())));
+        }
+        menu = menu.item(MenuItem::separator()).item(MenuItem::submenu(set));
+    }
+    menu
+}
+
+/// What the empty-space menu shows checked.
+#[derive(Clone, Copy, Debug)]
+pub struct Here {
+    pub show_hidden: bool,
+    pub sort: trove_fs::SortOrder,
+    pub view: View,
+    pub in_trash: bool,
+    pub recent: bool,
+}
+
+/// The menu on a folder's empty space.
+pub fn folder(menu: ContextMenu, h: &Here) -> ContextMenu {
+    let mut menu = menu;
+    if h.in_trash {
+        menu = menu.item_destructive("Empty Trash", EmptyTrash).separator();
+    } else if !h.recent {
+        menu = menu.item("New folder", NewFolder).item("New file", NewFile).item("Paste", Paste).separator();
+    }
+    let key = |label: &'static str, k: SortKey| MenuItem::action(label, SortBy(k)).checked(h.sort.key == k);
+    let sort = Menu::new("Sort by").items([
+        key("Name", SortKey::Name),
+        key("Size", SortKey::Size),
+        key("Kind", SortKey::Kind),
+        key("Modified", SortKey::Modified),
+        MenuItem::separator(),
+        MenuItem::action("Folders first", ToggleFoldersFirst).checked(h.sort.folders_first),
+    ]);
+    let view = Menu::new("View").items([
+        MenuItem::action("List", ListView).checked(h.view == View::List),
+        MenuItem::action("Grid", GridView).checked(h.view == View::Grid),
+    ]);
+    menu.entry(MenuItem::action("Show hidden files", ToggleHidden).checked(h.show_hidden)).submenu(sort).submenu(view)
+}
+
+/// What the sidebar's menu acts on: the row the active tab shows.
+#[derive(Clone, Debug)]
+pub enum Place {
+    Folder { path: PathBuf, bookmark: bool },
+    Volume { mount: PathBuf, ejectable: bool },
+    Trash,
+    Recent,
+}
+
+pub fn sidebar(menu: ContextMenu, place: Option<&Place>) -> ContextMenu {
+    let mut menu = menu;
+    match place {
+        Some(Place::Folder { path, bookmark }) => {
+            menu = menu.item("Open in new tab", OpenPlaceInNewTab(path.clone()));
+            if *bookmark {
+                menu = menu.separator().item("Remove from bookmarks", RemoveBookmark(path.clone()));
+            }
+        }
+        Some(Place::Volume { mount, ejectable }) => {
+            menu = menu.item("Open in new tab", OpenPlaceInNewTab(mount.clone()));
+            if *ejectable {
+                menu = menu.separator().item("Eject", Eject(mount.clone()));
+            }
+        }
+        Some(Place::Trash) => {
+            menu = menu.item_destructive("Empty Trash", EmptyTrash);
+        }
+        Some(Place::Recent) | None => {}
+    }
+    if !matches!(place, Some(Place::Trash)) {
+        menu = menu.separator().item_destructive("Empty Trash", EmptyTrash);
+    }
+    menu
+}
+
+pub fn tabs(menu: ContextMenu, count: usize) -> ContextMenu {
+    let menu = menu.item("Duplicate tab", DuplicateTab).separator().item("Close tab", CloseTab);
+    if count > 1 { menu.item("Close other tabs", CloseOtherTabs) } else { menu }
+}

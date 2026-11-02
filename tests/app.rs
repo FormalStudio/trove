@@ -241,7 +241,7 @@ fn search_filters_by_name_and_escape_clears() {
     h.settle();
     assert_eq!(h.names(), ["Documents", "Downloads", "todo.txt"]);
     let (left, _) = h.root().read(&h.cx).status().read(&h.cx).summary(&h.cx);
-    assert_eq!(left, "3 of 10 items");
+    assert_eq!(left, "3 results");
 
     h.act(ClearSearch);
     assert_eq!(h.names(), ROOT_NAMES);

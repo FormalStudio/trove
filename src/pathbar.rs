@@ -9,7 +9,7 @@ use std::rc::Rc;
 use nd::prelude::*;
 use trove_fs::Volume;
 
-use crate::actions::{GoTo, PATH_EDIT};
+use crate::actions::{DRAG_FILES, DropOnto, GoTo, PATH_EDIT};
 use crate::icons;
 use crate::location::Location;
 use crate::pump::pump;
@@ -302,7 +302,15 @@ impl Render for PathBar {
                 if let Some(glyph) = seg.icon {
                     b = b.icon(glyph);
                 }
-                row = row.child(b.on_click(move |_: &ClickEvent, window, cx| on_go(to.clone(), window, cx)));
+                let b = b.on_click(move |_: &ClickEvent, window, cx| on_go(to.clone(), window, cx));
+                let crumb = div().id(format!("crumb-drop-{i}")).child(b);
+                row = row.child(match seg.location.dir().map(Path::to_path_buf) {
+                    Some(dest) => crumb.accepts_drops([DRAG_FILES]).on_drop(move |e: &Dropped, window, cx| {
+                        let dragged = PathBuf::from(e.item.id.as_ref());
+                        cx.dispatch_action(window.id(), &DropOnto { dragged, dest: dest.clone() });
+                    }),
+                    None => crumb,
+                });
             }
         }
         let edit = cx.weak_entity();

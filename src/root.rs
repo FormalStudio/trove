@@ -17,9 +17,11 @@ use crate::status::StatusBar;
 use crate::tab::{Tab, View};
 
 /// Where the first tab opens.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum Start {
     Home,
+    /// The tabs the last run left, from the session.
+    Restore(crate::session::Session),
     /// A path from the command line: a folder opens, a file opens its folder with the file
     /// selected. Which one it is shows when the listing answers, never by a stat up front.
     Path(PathBuf),
@@ -46,16 +48,25 @@ pub struct Root {
     pathbar: Entity<PathBar>,
     status: Entity<StatusBar>,
     preview: Entity<Preview>,
+    quicklook: Entity<crate::quicklook::QuickLook>,
     show_preview: bool,
     show_hidden: bool,
     chrome: Option<Chrome>,
     titles: Vec<String>,
+    size: (f32, f32),
     _watch: Option<Subscription>,
     _volumes: Subscription,
 }
 
 impl Root {
     pub fn new(start: Start, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        crate::settings::init(cx);
+        crate::ops::init(cx);
+        let prefs = crate::settings::get(cx);
+        let start_path = match &start {
+            Start::Path(p) => Some(p.clone()),
+            _ => None,
+        };
         let me = cx.weak_entity();
         let go = move |location: Location, window: &mut Window, cx: &mut App| {
             let _ = me.update(cx, |this, cx| this.go(location, window, cx));
@@ -80,26 +91,50 @@ impl Root {
             next_id: 0,
             sidebar,
             pathbar,
-            status: cx.new(|_| StatusBar::new()),
-            preview: cx.new(|_| Preview::new()),
+            status: cx.new(|cx| StatusBar::new(window.id(), cx)),
+            preview: cx.new(Preview::new),
+            quicklook: cx.new(crate::quicklook::QuickLook::new),
             show_preview: false,
-            show_hidden: false,
+            show_hidden: prefs.show_hidden,
             chrome: None,
             titles: Vec::new(),
+            size: (0., 0.),
             _watch: None,
             _volumes: volumes,
         };
-        let (location, file_check) = match start {
-            Start::Home => (home, false),
-            Start::Path(p) => (Location::Dir(p), true),
+        let view = match prefs.default_view {
+            crate::settings::DefaultView::List => View::List,
+            crate::settings::DefaultView::Grid => View::Grid,
         };
-        let tab = this.make_tab(location, View::List, cx);
-        if file_check {
-            tab.update(cx, |t, _| t.open_parent_if_file());
+        let mut active = 0;
+        match start {
+            Start::Restore(session) => {
+                for saved in &session.tabs {
+                    let tab = this.make_tab(saved.location(), saved.view(), cx);
+                    let sort = saved.sort();
+                    tab.update(cx, |t, cx| t.set_sort(sort, cx));
+                    let id = this.take_id();
+                    this.tabs.push((id, tab));
+                }
+                this.show_preview = session.show_preview;
+                active = session.active;
+            }
+            Start::Home | Start::Path(_) => {}
         }
-        let id = this.take_id();
-        this.tabs.push((id, tab));
-        this.activate(0, window, cx);
+        if this.tabs.is_empty() {
+            let (location, file_check) = match start_path {
+                Some(p) => (Location::Dir(p), true),
+                None => (home, false),
+            };
+            let tab = this.make_tab(location, view, cx);
+            if file_check {
+                tab.update(cx, |t, _| t.open_parent_if_file());
+            }
+            let id = this.take_id();
+            this.tabs.push((id, tab));
+        }
+        this.register_drops();
+        this.activate(active, window, cx);
         this
     }
 
@@ -111,6 +146,22 @@ impl Root {
 
     pub fn active_tab(&self) -> &Entity<Tab> {
         &self.tabs[self.active].1
+    }
+
+    pub fn preview(&self) -> &Entity<Preview> {
+        &self.preview
+    }
+
+    pub fn quicklook(&self) -> &Entity<crate::quicklook::QuickLook> {
+        &self.quicklook
+    }
+
+    pub fn window_id(&self) -> WindowId {
+        self.window
+    }
+
+    pub fn sidebar(&self) -> &Entity<Sidebar> {
+        &self.sidebar
     }
 
     pub fn active_index(&self) -> usize {
@@ -132,8 +183,16 @@ impl Root {
     /// Applies everything each tab's listing has sent, waiting up to `timeout` per tab: the
     /// host's pump, for tests and the appearance audit, which run none.
     pub fn drain(&mut self, timeout: std::time::Duration, cx: &mut Context<Self>) {
-        for (_, tab) in &self.tabs {
-            tab.update(cx, |t, cx| t.drain(timeout, cx));
+        loop {
+            let ran = crate::ops::run_deferred(cx);
+            let jobs = crate::ops::jobs(cx);
+            let moved = jobs.update(cx, |j, cx| j.drain(timeout, cx));
+            for (_, tab) in &self.tabs {
+                tab.update(cx, |t, cx| t.drain(timeout, cx));
+            }
+            if !ran && !moved && !crate::ops::run_deferred(cx) {
+                break;
+            }
         }
     }
 
@@ -146,7 +205,17 @@ impl Root {
 
     fn make_tab(&mut self, location: Location, view: View, cx: &mut Context<Self>) -> Entity<Tab> {
         let show_hidden = self.show_hidden;
-        let tab = cx.new(|cx| Tab::new(location, show_hidden, view, cx));
+        let folders_first = crate::settings::get(cx).folders_first;
+        let window = self.window;
+        let tab = cx.new(|cx| {
+            let mut t = Tab::new(location, show_hidden, view, cx);
+            t.set_window(window);
+            if !folders_first {
+                let sort = trove_fs::SortOrder { folders_first, ..t.sort() };
+                t.set_sort(sort, cx);
+            }
+            t
+        });
         cx.observe(&tab, |this: &mut Root, _, cx| this.refresh_titles(cx)).detach();
         tab
     }
@@ -159,6 +228,7 @@ impl Root {
         self._watch = Some(cx.observe(&tab, |this: &mut Root, _, cx| this.sync_chrome(cx)));
         self.chrome = None;
         self.sync_chrome(cx);
+        self.save_session(cx);
         window.focus("files");
         cx.notify();
     }
@@ -189,6 +259,7 @@ impl Root {
             self.titles = titles;
             cx.notify();
         }
+        self.save_session(cx);
     }
 
     fn new_tab(&mut self, location: Location, select: bool, window: &mut Window, cx: &mut Context<Self>) {
@@ -269,6 +340,76 @@ impl Root {
         for (_, tab) in &self.tabs {
             tab.update(cx, |t, cx| t.set_show_hidden(show, cx));
         }
+        crate::settings::set(cx, "show_hidden", &show);
+    }
+
+    fn duplicate_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let (location, view, sort) = {
+            let tab = self.active_tab().read(cx);
+            (tab.location().clone(), tab.view(), tab.sort())
+        };
+        let tab = self.make_tab(location, view, cx);
+        tab.update(cx, |t, cx| t.set_sort(sort, cx));
+        let at = self.active + 1;
+        let id = self.take_id();
+        self.tabs.insert(at, (id, tab));
+        self.refresh_titles(cx);
+        self.activate(at, window, cx);
+    }
+
+    fn close_other_tabs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let keep = self.tabs.remove(self.active);
+        self.tabs = vec![keep];
+        self.refresh_titles(cx);
+        self.activate(0, window, cx);
+    }
+
+    /// The tabs as the next launch reopens them. Kept on every change; the store writes it a
+    /// moment later off the main thread, and only when it moved.
+    fn save_session(&mut self, cx: &mut Context<Self>) {
+        if crate::env::get().demo {
+            return;
+        }
+        let tabs = self
+            .tabs
+            .iter()
+            .map(|(_, t)| {
+                let t = t.read(cx);
+                crate::session::TabState::new(t.location(), t.view(), t.sort())
+            })
+            .collect();
+        let session = crate::session::Session {
+            tabs,
+            active: self.active,
+            width: self.size.0,
+            height: self.size.1,
+            show_preview: self.show_preview,
+        };
+        crate::session::save(cx, session);
+    }
+
+    /// Files dropped from another app land in the folder the active tab shows.
+    fn register_drops(&self) {
+        let me = self.me();
+        let window = self.window;
+        // nd: SystemEvent::FileDrop names the window and a position but no element, so a drop
+        // from another app cannot target the folder row or sidebar place under the pointer.
+        nd::system::on_event(&nd::system::system(), move |event, cx| {
+            let nd::system::SystemEvent::FileDrop { window: on, paths, .. } = event else { return };
+            if *on != window || paths.is_empty() {
+                return;
+            }
+            let Some(root) = me.upgrade() else { return };
+            let (origin, dest) = {
+                let r = root.read(cx);
+                let tab = r.active_tab().read(cx);
+                let dest = tab.location().dir().map(PathBuf::from).filter(|_| !tab.is_trash());
+                (crate::ops::Origin { window, tab: Some(r.active_tab().downgrade()) }, dest)
+            };
+            if let Some(dest) = dest {
+                crate::fileops::transfer(cx, origin, paths.clone(), dest);
+            }
+        });
     }
 
     fn view_switch(&self) -> impl IntoElement + use<> {
@@ -286,9 +427,22 @@ impl Root {
                     .tooltip("Grid")
                     .dispatch(GridView),
             )
+            .child(
+                icon_button("view-columns", icons::columns_view())
+                    .checked(view == View::Columns)
+                    .tooltip("Columns")
+                    .dispatch(crate::keys::ColumnsView),
+            )
     }
 
-    fn tab_strip(&self) -> TabStrip {
+    fn tab_strip(&self) -> impl IntoElement + use<> {
+        let count = self.tabs.len();
+        // nd: tab_strip has no per-tab context menu or drop target, so the menu acts on the
+        // active tab and files cannot be dropped on a tab.
+        div().id("tab-strip").child(self.tab_bar()).context_menu(move |menu, _, _| crate::menus::tabs(menu, count))
+    }
+
+    fn tab_bar(&self) -> TabStrip {
         let active = format!("tab-{}", self.tabs[self.active].0);
         let specs = self.tabs.iter().zip(&self.titles).map(|((id, _), title)| nd::components::TabSpec {
             id: format!("tab-{id}").into(),
@@ -359,7 +513,14 @@ impl Root {
     }
 
     fn actions(&self, root: Scaffold, cx: &mut Context<Self>) -> Scaffold {
+        let root = crate::fileops::register(root, cx);
+        let root = crate::keys::on_root(root, cx);
         root.on_action(cx.listener(Self::open))
+            .on_action(cx.listener(|this, _: &DuplicateTab, window, cx| this.duplicate_tab(window, cx)))
+            .on_action(cx.listener(|this, _: &CloseOtherTabs, window, cx| this.close_other_tabs(window, cx)))
+            .on_action(cx.listener(|this, OpenPlaceInNewTab(path): &OpenPlaceInNewTab, window, cx| {
+                this.new_tab(Location::Dir(path.clone()), false, window, cx)
+            }))
             .on_action(cx.listener(Self::open_in_new_tab))
             .on_action(cx.listener(Self::enter_folder))
             .on_action(cx.listener(Self::toggle_hidden))
@@ -382,6 +543,7 @@ impl Root {
             .on_action(cx.listener(|this, _: &GridView, _, cx| this.with_tab(cx, |t, cx| t.set_view(View::Grid, cx))))
             .on_action(cx.listener(|this, _: &TogglePreview, _, cx| {
                 this.show_preview = !this.show_preview;
+                this.save_session(cx);
                 cx.notify();
             }))
             .on_action(
@@ -436,7 +598,10 @@ impl Root {
     fn step(&mut self, step: Step, extend: bool, cx: &mut Context<Self>) {
         self.with_tab(cx, |t, cx| {
             let by = match (step, t.view()) {
-                (Step::Rows(n), View::List) => n,
+                (Step::Cells(_), _) if t.showing_results() => return,
+                (Step::Rows(n), _) if t.showing_results() => n,
+                (Step::Rows(n), View::List | View::Columns) => n,
+                (Step::Cells(n), View::Columns) => return crate::columns::step(t, n, cx),
                 (Step::Rows(n), View::Grid) => n * t.lanes() as isize,
                 (Step::Cells(n), View::Grid) => n,
                 (Step::Cells(_), View::List) => return,
@@ -453,17 +618,27 @@ enum Step {
 }
 
 impl Render for Root {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         crate::trace::first_render();
+        crate::search::after_first_frame(cx);
+        let viewport = window.viewport_size();
+        let size = (viewport.width, viewport.height);
+        if size != self.size {
+            self.size = size;
+            self.save_session(cx);
+        }
         let tabs = (self.tabs.len() > 1).then(|| self.tab_strip());
         let content = v_flex()
             .size_full()
             .children(tabs)
             .child(div().flex_1().min_h_0().child(self.active_tab().clone()))
-            .child(self.status.clone());
+            .child(self.status.clone())
+            .child(self.quicklook.clone());
         let root = scaffold()
             .key_context(WINDOW)
             .toolbar(self.toolbar(cx))
+            // nd: the sidebar and inspector panes report no width change, so the session keeps
+            // neither width.
             .sidebar(sidebar().width(px(208.)).child(self.sidebar.clone()))
             .content(content)
             .inspector(
@@ -472,9 +647,10 @@ impl Render for Root {
                     .collapsed(!self.show_preview)
                     .on_collapse_change(cx.listener(|this, e: &PaneCollapsed, _, cx| {
                         this.show_preview = !e.collapsed;
+                        this.save_session(cx);
                         cx.notify();
                     }))
-                    .child(self.preview.clone()),
+                    .child(crate::preview::pane(&self.preview, self.show_preview, cx)),
             );
         self.actions(root, cx)
     }

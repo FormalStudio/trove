@@ -100,7 +100,11 @@ const FILES: &[(&str, u64, When)] = &[
 
 /// Builds or refreshes the fixture and returns its root.
 pub fn ensure() -> io::Result<PathBuf> {
-    let root = root();
+    ensure_at(root())
+}
+
+/// The fixture at `root` instead of the shared one: tests that change files get their own.
+pub fn ensure_at(root: PathBuf) -> io::Result<PathBuf> {
     for dir in DIRS {
         fs::create_dir_all(root.join(dir))?;
     }

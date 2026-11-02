@@ -7605,11 +7605,17 @@ name = "trove"
 version = "0.1.0"
 dependencies = [
  "flume 0.11.1",
+ "image",
  "jiff",
  "nd",
  "nd-test",
  "ndshell",
+ "serde",
+ "tempfile",
  "trove-fs",
+ "trove-ops",
+ "trove-preview",
+ "trove-search",
 ]
 
 [[package]]

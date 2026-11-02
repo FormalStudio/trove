@@ -9,6 +9,7 @@ use trove_fs::{FileKind, PlaceIcon, VolumeKind};
 struct Extra {
     list: Icon,
     grid: Icon,
+    columns: Icon,
     drive: Icon,
     usb: Icon,
     server: Icon,
@@ -38,6 +39,7 @@ fn extra() -> &'static Extra {
     EXTRA.get_or_init(|| Extra {
         list: reg("list", include_str!("icons/list.svg"), &["list.bullet"], Icon::Menu),
         grid: reg("layout-grid", include_str!("icons/layout-grid.svg"), &["square.grid.2x2"], Icon::Square),
+        columns: reg("columns-3", include_str!("icons/columns-3.svg"), &["rectangle.split.3x1"], Icon::Square),
         drive: reg("hard-drive", include_str!("icons/hard-drive.svg"), &["internaldrive"], Icon::Disc3),
         usb: reg("usb", include_str!("icons/usb.svg"), &["externaldrive"], Icon::Disc3),
         server: reg("server", include_str!("icons/server.svg"), &["server.rack"], Icon::Globe),
@@ -84,6 +86,10 @@ pub fn list_view() -> Icon {
 
 pub fn grid_view() -> Icon {
     extra().grid
+}
+
+pub fn columns_view() -> Icon {
+    extra().columns
 }
 
 pub fn eject() -> Icon {

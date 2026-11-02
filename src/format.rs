@@ -70,10 +70,15 @@ impl Today {
         }
     }
 
-    /// The long form for the preview pane: "14 March 2026 at 09:41".
+    /// The preview's form, with the time: "Today, 14:02", else "14 Mar 2026, 09:41".
     pub fn long(&self, t: SystemTime) -> String {
         let Some(z) = self.zoned(t) else { return String::new() };
-        z.strftime("%-d %B %Y at %H:%M").to_string()
+        let day = z.date();
+        if day == self.date || self.date.yesterday().is_ok_and(|y| y == day) {
+            self.modified(t)
+        } else {
+            z.strftime("%-d %b %Y, %H:%M").to_string()
+        }
     }
 }
 

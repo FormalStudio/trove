@@ -1,0 +1,441 @@
+//! Finder's columns: one list per folder from Home (or the root) down to the tab's folder,
+//! then the folder under the cursor, or the preview of the file under it. The tab's folder is
+//! the tab's own listing; the folders above it are listed once and kept while the tab moves
+//! among them, the one under the cursor is listed as the cursor reaches it. A move between
+//! columns changes the tab's folder without adding to its history.
+
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::Duration;
+
+use nd::prelude::*;
+use trove_fs::{Change, Entry, EntryId, EntryKind, ListEvent, ListOptions, Listing, SortOrder};
+
+use crate::icons;
+use crate::location::Location;
+use crate::preview::{Item, Preview};
+use crate::pump::pump;
+use crate::tab::{ROW_HEIGHT, Tab};
+
+const COLUMN_W: f32 = 220.;
+const PREVIEW_MIN: f32 = 280.;
+
+pub struct Columns {
+    /// The tab's own folder, the column the keyboard is in.
+    pub current: ListState<EntryId>,
+    levels: Vec<Level>,
+    child: Option<Level>,
+    preview: Option<Entity<Preview>>,
+}
+
+struct Level {
+    dir: Arc<Path>,
+    entries: Vec<Entry>,
+    index: HashMap<EntryId, usize>,
+    list: ListState<EntryId>,
+    events: Option<flume::Receiver<ListEvent>>,
+    _listing: Option<Listing>,
+    /// The entry on the way down to the tab's folder, or under the cursor.
+    on_path: Option<EntryId>,
+    done: bool,
+}
+
+impl Columns {
+    pub fn new<T: 'static>(cx: &mut Context<T>) -> Self {
+        Self {
+            current: ListState::new(cx).estimated_row_height(px(ROW_HEIGHT)),
+            levels: Vec::new(),
+            child: None,
+            preview: None,
+        }
+    }
+
+    /// The folders shown before the tab's own, outermost first, for tests.
+    pub fn ancestors(&self) -> Vec<PathBuf> {
+        self.levels.iter().map(|l| l.dir.to_path_buf()).collect()
+    }
+
+    /// The folder listed after the tab's own, for tests.
+    pub fn child(&self) -> Option<PathBuf> {
+        self.child.as_ref().map(|l| l.dir.to_path_buf())
+    }
+
+    /// The names a column shows, for tests: the column of `dir`.
+    pub fn names_in(&self, dir: &Path) -> Vec<String> {
+        self.level(dir).map(|l| l.entries.iter().map(|e| e.name.to_string()).collect()).unwrap_or_default()
+    }
+
+    fn level(&self, dir: &Path) -> Option<&Level> {
+        self.levels.iter().chain(self.child.as_ref()).find(|l| &*l.dir == dir)
+    }
+
+    /// The path of `id` in the column of `dir`, and whether it is a folder.
+    fn path_in(&self, dir: &Path, id: EntryId) -> Option<(PathBuf, bool)> {
+        let level = self.level(dir)?;
+        let e = level.entries.get(*level.index.get(&id)?)?;
+        let is_dir = e.is_dir() || matches!(e.kind, EntryKind::Symlink { .. }) && e.meta.is_none();
+        Some((e.path_in(dir), is_dir))
+    }
+
+    fn level_mut(&mut self, dir: &Path) -> Option<&mut Level> {
+        self.levels.iter_mut().chain(self.child.as_mut()).find(|l| &*l.dir == dir)
+    }
+
+    /// Waits up to `timeout` for every column's listing: the host's pump, for tests.
+    pub fn drain(&mut self, show_hidden: bool, timeout: Duration, cx: &mut App) {
+        for level in self.levels.iter_mut().chain(self.child.as_mut()) {
+            // nd-allow(clock-in-ui): a test drain's deadline, run with no executor
+            let deadline = std::time::Instant::now() + timeout;
+            while let Some(rx) = level.events.clone() {
+                if level.done {
+                    break;
+                }
+                // nd-allow(clock-in-ui): as above
+                let left = deadline.saturating_duration_since(std::time::Instant::now());
+                let Ok(first) = rx.recv_timeout(left) else { break };
+                let mut batch = vec![first];
+                batch.extend(rx.try_iter());
+                level.apply(batch, show_hidden, cx);
+            }
+        }
+    }
+}
+
+impl Level {
+    fn new(dir: &Path, show_hidden: bool, me: WeakEntity<Tab>, cx: &mut Context<Tab>) -> Self {
+        let dir: Arc<Path> = Arc::from(dir);
+        let listing = trove_fs::list(dir.to_path_buf(), ListOptions { show_hidden });
+        let events = listing.events.clone();
+        let at = dir.clone();
+        pump(events.clone(), me, move |tab: &mut Tab, batch, cx| {
+            let show_hidden = tab.show_hidden();
+            match tab.extras.columns.level_mut(&at) {
+                Some(level) => {
+                    level.apply(batch, show_hidden, cx);
+                    cx.notify();
+                    true
+                }
+                None => false,
+            }
+        });
+        Self {
+            dir,
+            entries: Vec::new(),
+            index: HashMap::new(),
+            list: ListState::new(cx).estimated_row_height(px(ROW_HEIGHT)),
+            events: Some(events),
+            _listing: Some(listing),
+            on_path: None,
+            done: false,
+        }
+    }
+
+    fn apply(&mut self, batch: Vec<ListEvent>, show_hidden: bool, cx: &mut App) {
+        for event in batch {
+            match event {
+                ListEvent::Entries(chunk) => {
+                    for e in chunk {
+                        if !self.index.contains_key(&e.id) {
+                            self.index.insert(e.id, self.entries.len());
+                            self.entries.push(e);
+                        }
+                    }
+                }
+                ListEvent::Meta(metas) => {
+                    for (id, meta) in metas {
+                        if let Some(&i) = self.index.get(&id) {
+                            self.entries[i].meta = Some(meta);
+                        }
+                    }
+                }
+                ListEvent::Changed(changes) => {
+                    for change in changes {
+                        match change {
+                            Change::Added(e) => {
+                                if !self.index.contains_key(&e.id) {
+                                    self.index.insert(e.id, self.entries.len());
+                                    self.entries.push(e);
+                                }
+                            }
+                            Change::Removed(id) => self.entries.retain(|e| e.id != id),
+                            Change::Updated(id, meta) => {
+                                if let Some(e) = self.entries.iter_mut().find(|e| e.id == id) {
+                                    e.meta = Some(meta);
+                                }
+                            }
+                            Change::Renamed { from, to } => {
+                                self.entries.retain(|e| e.id != from);
+                                self.entries.push(to);
+                            }
+                        }
+                    }
+                }
+                ListEvent::Complete | ListEvent::Error(_) => self.done = true,
+                ListEvent::Listed { .. } | ListEvent::Slow => {}
+            }
+        }
+        trove_fs::sort_entries(&mut self.entries, SortOrder::default());
+        self.index = self.entries.iter().enumerate().map(|(i, e)| (e.id, i)).collect();
+        let keys: Vec<EntryId> = self.entries.iter().filter(|e| show_hidden || !e.hidden).map(|e| e.id).collect();
+        self.list.set_items(keys, cx);
+        self.mark(cx);
+    }
+
+    fn mark(&mut self, cx: &mut App) {
+        let keys: Vec<EntryId> = self.on_path.into_iter().filter(|id| self.index.contains_key(id)).collect();
+        if self.list.selected() != keys {
+            self.list.set_selected(keys.clone(), cx);
+            if let Some(id) = keys.first() {
+                self.list.scroll_to(*id, Align::Nearest, px(0.), cx);
+            }
+        }
+    }
+
+    fn set_on_path(&mut self, id: Option<EntryId>, cx: &mut App) {
+        if self.on_path != id {
+            self.on_path = id;
+            self.mark(cx);
+        }
+    }
+}
+
+fn id_of(name: &std::ffi::OsStr) -> EntryId {
+    EntryId::of(&name.to_string_lossy())
+}
+
+/// Where the columns start for `dir`: Home when it is inside Home, else the root.
+fn origin(dir: &Path, home: &Path) -> PathBuf {
+    if dir.starts_with(home) { home.to_path_buf() } else { PathBuf::from("/") }
+}
+
+/// Lines the columns up with the tab's folder and cursor: reuses the columns above it, lists
+/// the ones it has not listed, and the folder under the cursor.
+fn sync(tab: &mut Tab, cx: &mut Context<Tab>) {
+    let Location::Dir(dir) = tab.location().clone() else {
+        tab.extras.columns.levels.clear();
+        tab.extras.columns.child = None;
+        return;
+    };
+    let home = crate::env::get().home.clone();
+    let start = origin(&dir, &home);
+    let mut chain: Vec<PathBuf> =
+        dir.ancestors().skip(1).take_while(|a| a.starts_with(&start)).map(Path::to_path_buf).collect();
+    chain.reverse();
+    let show_hidden = tab.show_hidden();
+    let me = cx.weak_entity();
+    let mut old = std::mem::take(&mut tab.extras.columns.levels);
+    let mut levels = Vec::with_capacity(chain.len());
+    for (i, at) in chain.iter().enumerate() {
+        let next = chain.get(i + 1).map_or(dir.as_path(), PathBuf::as_path);
+        let mut level = match old.iter().position(|l| &*l.dir == at.as_path()) {
+            Some(p) => old.swap_remove(p),
+            None => match tab.extras.columns.child.take() {
+                Some(c) if &*c.dir == at.as_path() => c,
+                other => {
+                    tab.extras.columns.child = other;
+                    Level::new(at, show_hidden, me.clone(), cx)
+                }
+            },
+        };
+        level.set_on_path(next.file_name().map(id_of), cx);
+        levels.push(level);
+    }
+    tab.extras.columns.levels = levels;
+
+    let under = tab.cursor().filter(|_| tab.selected().len() == 1).filter(|id| tab.is_folder(id));
+    let child_dir = under.and_then(|id| tab.path_of(&id));
+    match child_dir {
+        Some(path) => {
+            if tab.extras.columns.child.as_ref().is_none_or(|c| *c.dir != *path) {
+                let reuse = old.iter().position(|l| *l.dir == *path).map(|p| old.swap_remove(p));
+                let mut level = reuse.unwrap_or_else(|| Level::new(&path, show_hidden, me.clone(), cx));
+                level.set_on_path(None, cx);
+                tab.extras.columns.child = Some(level);
+            }
+        }
+        None => tab.extras.columns.child = None,
+    }
+}
+
+/// Left and Right: out to the folder above, with this one selected, or into the folder under
+/// the cursor.
+pub fn step(tab: &mut Tab, by: isize, cx: &mut Context<Tab>) {
+    if tab.extras.results.shown() {
+        return;
+    }
+    let Location::Dir(dir) = tab.location().clone() else { return };
+    if by < 0 {
+        let home = crate::env::get().home.clone();
+        let Some(parent) = dir.parent().filter(|p| p.starts_with(origin(&dir, &home))) else { return };
+        let select = dir.file_name().map(id_of);
+        tab.retarget(Location::Dir(parent.to_path_buf()), select, cx);
+    } else if let Some(id) = tab.cursor().filter(|id| tab.is_folder(id))
+        && let Some(path) = tab.path_of(&id)
+    {
+        tab.retarget(Location::Dir(path), None, cx);
+    }
+}
+
+/// A row of any column: icon, name, and a chevron for folders.
+fn row(e: &Entry, theme: &Theme) -> AnyElement {
+    let symlinked = matches!(e.kind, EntryKind::Symlink { .. }) && e.is_dir();
+    let glyph = if symlinked { icons::symlinked_folder() } else { icons::for_kind(e.file_kind) };
+    h_flex()
+        .h(px(ROW_HEIGHT))
+        .px(theme.spacing.sm)
+        .gap(theme.spacing.sm)
+        .items_center()
+        .min_w_0()
+        .child(icon(glyph, 16.).text_color(icons::tint(e.file_kind, theme)))
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .child(text(e.name.to_string()).truncate().when(e.hidden, |t| t.text_color(theme.text.secondary))),
+        )
+        .when(e.is_dir(), |r| r.child(icon(Icon::ChevronRight, 12.).text_color(theme.text.tertiary)))
+        .into_any_element()
+}
+
+impl Tab {
+    fn column_row(
+        &mut self,
+        (dir, id): (Arc<Path>, EntryId),
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let theme = cx.theme();
+        let columns = &self.extras.columns;
+        let entry = columns.level(&dir).and_then(|l| l.index.get(&id).and_then(|i| l.entries.get(*i)));
+        match entry {
+            Some(e) => row(e, theme),
+            None => div().into_any_element(),
+        }
+    }
+
+    fn current_row(&mut self, id: EntryId, _window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme();
+        match self.entry(&id) {
+            Some(e) => row(e, theme),
+            None => div().into_any_element(),
+        }
+    }
+}
+
+/// The columns view: as many of the last columns as fit `width`, the preview taking the rest.
+pub fn render(tab: &mut Tab, width: f32, cx: &mut Context<Tab>) -> AnyElement {
+    sync(tab, cx);
+    let me = cx.weak_entity();
+
+    let file = tab
+        .cursor()
+        .filter(|_| tab.selected().len() == 1)
+        .filter(|id| !tab.is_folder(id))
+        .and_then(|id| tab.path_of(&id))
+        .map(|p| Item::of(p, false, None));
+    if file.is_some() && tab.extras.columns.preview.is_none() {
+        tab.extras.columns.preview = Some(cx.new(Preview::new));
+    }
+    if let Some(preview) = tab.extras.columns.preview.clone() {
+        preview.update(cx, |p, cx| p.show(file.clone(), cx));
+    }
+
+    let separator = cx.theme().separator;
+    let trailing = if file.is_some() {
+        PREVIEW_MIN
+    } else if tab.extras.columns.child.is_some() {
+        COLUMN_W
+    } else {
+        0.
+    };
+    let room = ((width - trailing) / COLUMN_W).floor().max(1.) as usize;
+    let levels = &tab.extras.columns.levels;
+    let skip = (levels.len() + 1).saturating_sub(room);
+
+    let column = |content: AnyElement| {
+        div()
+            .flex_none()
+            .w(px(COLUMN_W))
+            .h_full()
+            .border_r_1()
+            .border_color(separator)
+            .child(content)
+            .into_any_element()
+    };
+    let level_list = |level: &Level, id: String, me: WeakEntity<Tab>, cx: &Context<Tab>| {
+        let dir = level.dir.clone();
+        let render = cx.processor(Tab::column_row);
+        let (sel, act) = (me.clone(), me);
+        let at = dir.clone();
+        let dir_of_act = dir.clone();
+        list(id, &level.list, move |key, w, cx| render((dir.clone(), key), w, cx))
+            .selection(Selection::single())
+            .on_select(move |e: &SelectEvent<EntryId>, window, cx| {
+                let to = at.to_path_buf();
+                let key = e.key;
+                let _ = sel.update(cx, |t, cx| {
+                    t.retarget(Location::Dir(to), Some(key), cx);
+                    window.focus("files");
+                });
+            })
+            .on_activate(move |e: &ActivateEvent<EntryId>, window, cx| {
+                let key = e.key;
+                let _ = act.update(cx, |t, cx| {
+                    let Some((path, is_dir)) = t.extras.columns.path_in(&dir_of_act, key) else { return };
+                    if is_dir {
+                        t.navigate(Location::Dir(path), window, cx);
+                    } else {
+                        crate::keys::open_file(&path, window, cx);
+                    }
+                });
+            })
+            .into_any_element()
+    };
+
+    let mut row_items: Vec<AnyElement> = Vec::new();
+    for (i, level) in tab.extras.columns.levels.iter().enumerate().skip(skip) {
+        row_items.push(column(level_list(level, format!("column-{i}"), me.clone(), cx)));
+    }
+    let (sel, act) = (me.clone(), me.clone());
+    let current = list("files-columns", &tab.extras.columns.current, cx.processor(Tab::current_row))
+        .selection(Selection::multiple())
+        .on_select(move |e: &SelectEvent<EntryId>, _, cx| {
+            let _ = sel.update(cx, |t, cx| t.on_select(e, cx));
+        })
+        .on_activate(move |e: &ActivateEvent<EntryId>, window, cx| {
+            let _ = act.update(cx, |t, cx| t.open(e.key, window, cx));
+        })
+        .into_any_element();
+    row_items.push(column(current));
+    if let Some(child) = &tab.extras.columns.child {
+        row_items.push(column(level_list(child, "column-next".to_owned(), me.clone(), cx)));
+    }
+    if file.is_some()
+        && let Some(preview) = &tab.extras.columns.preview
+    {
+        row_items.push(
+            div()
+                .id("column-preview")
+                .flex_1()
+                .min_w(px(PREVIEW_MIN))
+                .h_full()
+                .child(preview.clone())
+                .into_any_element(),
+        );
+    }
+    h_flex().id("columns").size_full().children(row_items).into_any_element()
+}
+
+impl Tab {
+    /// Waits for every column's listing, for tests.
+    pub fn drain_columns(&mut self, timeout: Duration, cx: &mut Context<Self>) {
+        let show_hidden = self.show_hidden();
+        self.extras.columns.drain(show_hidden, timeout, cx);
+        cx.notify();
+    }
+
+    pub fn column_view(&self) -> &Columns {
+        &self.extras.columns
+    }
+}

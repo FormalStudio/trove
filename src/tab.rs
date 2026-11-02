@@ -2,19 +2,24 @@
 //! and view mode, and the content it draws. A notify here re-renders this tab's content and
 //! whatever observes it (the status bar, the preview), never the sidebar or the other tabs.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use nd::core::WindowId;
 use nd::prelude::*;
 use trove_fs::{
     Change, Entry, EntryId, EntryKind, ListError, ListEvent, ListOptions, Listing, Meta, SortKey, SortOrder, Usage,
 };
 
+use crate::actions::{DRAG_FILES, DropOnto, FILES, RENAMING};
 use crate::format::{self, Today};
 use crate::icons;
 use crate::location::Location;
+use crate::menus;
+use crate::ops::{self, Clip, Origin};
 use crate::pump::pump;
+use crate::trash::{self, TrashInfo};
 
 /// List rows, Finder's density.
 pub const ROW_HEIGHT: f32 = 28.;
@@ -26,12 +31,35 @@ const DATE_W: f32 = 168.;
 const NAME_MIN: f32 = 220.;
 /// What a still-unmeasured content area is taken to be on the first frame.
 const DEFAULT_WIDTH: f32 = 760.;
+const ORIGIN_W: f32 = 220.;
+/// How long a job's results wait for the listing to show them before selection gives up.
+const PENDING_FOR: f64 = 4.;
+pub const RENAME_FIELD: &str = "rename";
+
+/// A name being edited in place.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Rename {
+    pub id: EntryId,
+    pub original: String,
+    pub text: SharedString,
+    pub error: Option<String>,
+    /// The rename job running for it; the field stays until it ends.
+    pub job: Option<trove_ops::JobId>,
+}
+
+/// What a finished job made, selected as soon as the listing has it.
+struct Pending {
+    ids: Vec<EntryId>,
+    rename: bool,
+    until: f64,
+}
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum View {
     #[default]
     List,
     Grid,
+    Columns,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -86,6 +114,18 @@ pub struct Tab {
     maybe_file: bool,
     home: PathBuf,
     trash: PathBuf,
+    window: Option<WindowId>,
+    renaming: Option<Rename>,
+    cut: HashSet<EntryId>,
+    pending: Option<Pending>,
+    /// The listing is a trash's `files` folder.
+    in_trash: bool,
+    trash_info: HashMap<EntryId, TrashInfo>,
+    trash_asked: HashSet<EntryId>,
+    /// An element to focus on the next frame, for state changes that arrive without a window.
+    focus_next: Option<&'static str>,
+    _clip: Subscription,
+    pub(crate) extras: crate::extras::TabExtras,
 }
 
 impl Tab {
@@ -96,10 +136,16 @@ impl Tab {
         cx.observe(&search, |this: &mut Tab, search, cx| {
             if search.read(cx).last_event() == Some(TextEvent::Edited) {
                 this.query = search.read(cx).text().clone();
+                crate::results::before_refresh(this, cx);
                 this.refresh(cx);
+                crate::results::after_refresh(this, cx);
             }
         })
         .detach();
+        let clip = ops::clip(cx);
+        let watch_clip = cx.observe(&clip, |this: &mut Tab, clip, cx| this.sync_cut(&clip, cx));
+        let weak = cx.weak_entity();
+        ops::jobs(cx).update(cx, |j, _| j.register(weak));
         let mut tab = Self {
             location: location.clone(),
             back: Vec::new(),
@@ -136,6 +182,16 @@ impl Tab {
             maybe_file: false,
             home: crate::env::get().home.clone(),
             trash: crate::env::get().trash.clone(),
+            window: None,
+            renaming: None,
+            cut: HashSet::new(),
+            pending: None,
+            in_trash: false,
+            trash_info: HashMap::new(),
+            trash_asked: HashSet::new(),
+            focus_next: None,
+            _clip: watch_clip,
+            extras: crate::extras::TabExtras::new(cx),
         };
         tab.load(location, cx);
         tab
@@ -214,6 +270,7 @@ impl Tab {
         match self.view {
             View::List => &self.table,
             View::Grid => &self.grid,
+            View::Columns => &self.extras.columns.current,
         }
     }
 
@@ -221,10 +278,14 @@ impl Tab {
         match self.view {
             View::List => &mut self.table,
             View::Grid => &mut self.grid,
+            View::Columns => &mut self.extras.columns.current,
         }
     }
 
     pub fn selected(&self) -> Vec<EntryId> {
+        if self.extras.results.shown() {
+            return self.extras.results.selected();
+        }
         self.list_state().selected()
     }
 
@@ -233,6 +294,9 @@ impl Tab {
     }
 
     pub fn path_of(&self, id: &EntryId) -> Option<PathBuf> {
+        if let Some(p) = self.extras.results.path_of(id) {
+            return Some(p);
+        }
         if let Some(p) = self.paths.get(id) {
             return Some(p.clone());
         }
@@ -308,9 +372,15 @@ impl Tab {
         self.cursor = None;
         self.anchor = None;
         self.typed.clear();
+        self.renaming = None;
+        self.pending = None;
+        self.trash_info.clear();
+        self.trash_asked.clear();
+        self.in_trash = location.dir().is_some_and(|d| trash::is_trash_files(d, &self.trash));
         self.load = Load::Loading;
         self.free = None;
         self.today = Today::now();
+        crate::thumbs::cancel(cx);
         for state in [&mut self.table, &mut self.grid] {
             state.set_items(Vec::new(), cx);
             state.scroll_to_top(cx);
@@ -369,6 +439,22 @@ impl Tab {
             let mut batch = vec![first];
             batch.extend(rx.try_iter());
             self.apply(batch, cx);
+        }
+        // Live changes after the listing finished: what a job made lands this way.
+        if let Some(rx) = self.events.clone() {
+            loop {
+                let mut batch: Vec<ListEvent> = rx.try_iter().collect();
+                if batch.is_empty() {
+                    if self.pending.is_none() {
+                        break;
+                    }
+                    match rx.recv_timeout(Duration::from_millis(1500)) {
+                        Ok(e) => batch.push(e),
+                        Err(_) => break,
+                    }
+                }
+                self.apply(batch, cx);
+            }
         }
         if let Some(rx) = self.usage.take() {
             self.free = rx.recv_timeout(Duration::from_millis(500)).ok().flatten();
@@ -435,6 +521,9 @@ impl Tab {
             self.resort();
         }
         self.refresh(cx);
+        if self.in_trash {
+            self.ask_trash_info(cx);
+        }
         true
     }
 
@@ -528,6 +617,7 @@ impl Tab {
             .collect();
         self.sync_view(cx);
         self.apply_reveal(cx);
+        self.apply_pending(cx);
         cx.notify();
     }
 
@@ -616,7 +706,9 @@ impl Tab {
         }
         self.search.update(cx, |s, cx| s.set_text("", window, cx));
         self.query = SharedString::default();
+        crate::results::before_refresh(self, cx);
         self.refresh(cx);
+        crate::results::after_refresh(self, cx);
         true
     }
 
@@ -631,8 +723,13 @@ impl Tab {
         cx.notify();
     }
 
-    fn on_select(&mut self, e: &SelectEvent<EntryId>, cx: &mut Context<Self>) {
+    pub(crate) fn on_select(&mut self, e: &SelectEvent<EntryId>, cx: &mut Context<Self>) {
         self.row_hit = true;
+        self.pending = None;
+        // nd: text_field reports no focus loss, so a click on another row stands in for it.
+        if self.renaming.as_ref().is_some_and(|r| r.id != e.key) {
+            self.commit_rename(cx);
+        }
         self.cursor = Some(e.key);
         if e.keys.len() <= 1 {
             self.anchor = Some(e.key);
@@ -644,6 +741,7 @@ impl Tab {
         if std::mem::take(&mut self.row_hit) {
             return;
         }
+        self.commit_rename(cx);
         if !self.selected().is_empty() {
             self.list_state_mut().set_selected(Vec::new(), cx);
             self.cursor = None;
@@ -653,6 +751,10 @@ impl Tab {
     }
 
     pub fn select_all(&mut self, cx: &mut Context<Self>) {
+        if self.extras.results.shown() {
+            self.extras.results.select_all(cx);
+            return cx.notify();
+        }
         let all = self.visible.clone();
         self.list_state_mut().set_selected(all, cx);
         cx.notify();
@@ -670,6 +772,10 @@ impl Tab {
     /// Moves the keyboard cursor by `step` rows (a grid's lane count for up and down);
     /// `extend` grows the selection from its anchor instead of replacing it.
     pub fn move_cursor(&mut self, step: isize, extend: bool, cx: &mut Context<Self>) {
+        if self.extras.results.shown() {
+            self.extras.results.move_cursor(step, extend, cx);
+            return cx.notify();
+        }
         if self.visible.is_empty() {
             return;
         }
@@ -696,6 +802,10 @@ impl Tab {
     }
 
     pub fn move_to_end(&mut self, end: bool, cx: &mut Context<Self>) {
+        if self.extras.results.shown() {
+            self.extras.results.move_to_end(end, cx);
+            return cx.notify();
+        }
         let id = if end { self.visible.last() } else { self.visible.first() };
         if let Some(id) = id.copied() {
             self.select_only(id, cx);
@@ -705,7 +815,7 @@ impl Tab {
     /// Grid lanes: how many tiles one row of the grid holds.
     pub fn lanes(&self) -> usize {
         match self.view {
-            View::List => 1,
+            View::List | View::Columns => 1,
             View::Grid => self.grid.handle().0.borrow().lanes().max(1),
         }
     }
@@ -713,6 +823,10 @@ impl Tab {
     /// Type-select: characters typed within a short pause build a prefix, and the first name
     /// in natural order starting with it is selected.
     pub fn type_select(&mut self, c: char, now: f64, cx: &mut Context<Self>) {
+        if self.extras.results.shown() {
+            self.extras.results.type_select(c, now, cx);
+            return cx.notify();
+        }
         if now - self.typed_at > TYPE_SELECT_WINDOW {
             self.typed.clear();
         }
@@ -734,12 +848,18 @@ impl Tab {
     /// The entry to open with Enter or a double click: the cursor's row, else the only one
     /// selected.
     pub fn target(&self) -> Option<EntryId> {
+        if self.extras.results.shown() {
+            return self.extras.results.target();
+        }
         let selected = self.selected();
         self.cursor.filter(|c| selected.contains(c)).or_else(|| selected.first().copied())
     }
 
     /// Whether `id` names a folder this tab can go into.
     pub fn is_folder(&self, id: &EntryId) -> bool {
+        if self.extras.results.shown() {
+            return self.extras.results.is_dir(id);
+        }
         self.entry(id).is_some_and(|e| e.is_dir() || matches!(e.kind, EntryKind::Symlink { .. }) && e.meta.is_none())
     }
 
@@ -749,10 +869,17 @@ impl Tab {
         }
         self.width = width;
         self.table.invalidate_all(cx);
+        self.extras.results.list.invalidate_all(cx);
         cx.notify();
     }
 
     // Drawing.
+
+    /// The table's columns by id, in order: a trash shows where each item came from and when
+    /// it was deleted instead of its kind and date.
+    fn column_ids(&self) -> &'static [&'static str] {
+        if self.in_trash { &["name", "origin", "deleted", "size"] } else { &["name", "size", "kind", "modified"] }
+    }
 
     fn columns(&self) -> Vec<Column> {
         let sort = self.sort();
@@ -761,6 +888,15 @@ impl Tab {
             let c = column(id, title).width(width).min_width(60.);
             if sort.key == key { c.sorted(dir) } else { c.sortable() }
         };
+        if self.in_trash {
+            let name = (self.width - ORIGIN_W - DATE_W - SIZE_W).max(NAME_MIN);
+            return vec![
+                col("name", "Name", SortKey::Name, name),
+                column("origin", "Original location").width(ORIGIN_W).min_width(60.),
+                column("deleted", "Date deleted").width(DATE_W).min_width(60.),
+                col("size", "Size", SortKey::Size, SIZE_W),
+            ];
+        }
         vec![
             col("name", "Name", SortKey::Name, self.name_width()),
             col("size", "Size", SortKey::Size, SIZE_W),
@@ -776,6 +912,13 @@ impl Tab {
     fn cell(&mut self, id: EntryId, col: usize, _window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme();
         let Some(e) = self.entry(&id) else { return div().into_any_element() };
+        let col_id = self.column_ids().get(col).copied().unwrap_or("name");
+        if col_id == "name"
+            && let Some(r) = self.renaming.as_ref().filter(|r| r.id == id)
+        {
+            return self.rename_field(r, false, cx);
+        }
+        let info = self.trash_info.get(&id);
         let quiet = |s: String| {
             text(s)
                 .text_size(theme.type_scale.footnote)
@@ -784,8 +927,8 @@ impl Tab {
                 .truncate()
                 .into_any_element()
         };
-        let content = match col {
-            0 => {
+        let content = match col_id {
+            "name" => {
                 let symlinked = matches!(e.kind, EntryKind::Symlink { .. }) && e.is_dir();
                 let glyph = if symlinked { icons::symlinked_folder() } else { icons::for_kind(e.file_kind) };
                 h_flex()
@@ -797,41 +940,125 @@ impl Tab {
                     ))
                     .into_any_element()
             }
-            1 if e.is_dir() && e.meta.as_ref().and_then(|m| m.child_count).is_none() => {
+            "size" if e.is_dir() && e.meta.as_ref().and_then(|m| m.child_count).is_none() => {
                 text("--").text_size(theme.type_scale.footnote).text_color(theme.text.secondary).into_any_element()
             }
-            1 => quiet(size_text(e)),
-            2 => quiet(e.file_kind.label().to_owned()),
+            "size" => quiet(size_text(e)),
+            "kind" => quiet(e.file_kind.label().to_owned()),
+            "origin" => quiet(info.and_then(|i| i.origin.as_ref()).map(|p| self.place_label(p)).unwrap_or_default()),
+            "deleted" => quiet(
+                info.and_then(|i| i.deleted.as_deref())
+                    .map(|d| trash::deleted_label(d, &self.today))
+                    .unwrap_or_default(),
+            ),
             _ => quiet(e.meta.as_ref().and_then(|m| m.modified).map(|t| self.today.modified(t)).unwrap_or_default()),
         };
-        h_flex()
+        let row = h_flex()
             .h(px(ROW_HEIGHT))
             .px(theme.spacing.sm)
             .items_center()
-            .when(col == 1, |d| d.justify_end())
-            .child(content)
+            .when(col_id == "size", |d| d.justify_end())
+            .when(self.cut.contains(&id), |d| d.opacity(0.5))
+            .child(content);
+        self.file_events(row, id, cx).into_any_element()
+    }
+
+    /// A row's or tile's menu, drag and drop.
+    fn file_events(&self, d: Div, id: EntryId, cx: &mut Context<Self>) -> Div {
+        let Some(path) = self.path_of(&id) else { return d };
+        let me = cx.weak_entity();
+        let d = d.draggable(DragItem::new(DRAG_FILES, path.display().to_string())).context_menu(move |menu, _, cx| {
+            let Some(target) = me.update(cx, |t, cx| t.menu_target(id, cx)) else { return menu };
+            menus::files(menu, &target, cx)
+        });
+        if !self.is_folder(&id) || self.in_trash {
+            return d;
+        }
+        d.accepts_drops([DRAG_FILES]).on_drop(move |e: &Dropped, window, cx| {
+            let dragged = PathBuf::from(e.item.id.as_ref());
+            cx.dispatch_action(window.id(), &DropOnto { dragged, dest: path.clone() });
+        })
+    }
+
+    /// The name field of a rename in progress, in a row or (`tile`) under a tile's picture.
+    fn rename_field(&self, r: &Rename, tile: bool, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme();
+        let (change, submit) = (cx.weak_entity(), cx.weak_entity());
+        // nd: text_field cannot select a range, so the name minus its extension is not
+        // preselected; the field opens with the whole name and the caret at its end.
+        let field = text_field(RENAME_FIELD)
+            .text(r.text.clone())
+            .label("Name")
+            .disabled(r.job.is_some())
+            .flex_1()
+            .min_w_0()
+            .on_change(move |e: &TextChanged, _, cx| {
+                let _ = change.update(cx, |t, cx| t.set_rename_text(e.text.clone(), cx));
+            })
+            .on_submit(move |_: &TextSubmitted, _, cx| {
+                let _ = submit.update(cx, |t, cx| t.commit_rename(cx));
+            });
+        let error = r.error.clone().map(|why| {
+            text(why).id("rename-error").text_size(theme.type_scale.footnote).text_color(theme.text.danger).truncate()
+        });
+        if tile {
+            return v_flex().w_full().gap(theme.spacing.xs).child(field).children(error).into_any_element();
+        }
+        let glyph = self
+            .entry(&r.id)
+            .map(|e| icon(icons::for_kind(e.file_kind), 16.).text_color(icons::tint(e.file_kind, theme)));
+        h_flex()
+            .h(px(ROW_HEIGHT))
+            .px(theme.spacing.sm)
+            .gap(theme.spacing.sm)
+            .items_center()
+            .children(glyph)
+            .child(field)
+            .children(error.map(|e| div().max_w(px(260.)).child(e)))
             .into_any_element()
     }
 
+    /// "Documents" for a folder inside the home, else the full path.
+    fn place_label(&self, p: &Path) -> String {
+        if p == self.home {
+            return "Home".to_owned();
+        }
+        match p.strip_prefix(&self.home) {
+            Ok(rel) => rel.display().to_string(),
+            Err(_) => p.display().to_string(),
+        }
+    }
+
     fn tile(&mut self, id: EntryId, _window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
-        let theme = cx.theme();
+        let field = self.renaming.as_ref().filter(|r| r.id == id).map(|r| self.rename_field(r, true, cx));
+        let path = self.path_of(&id);
         let Some(e) = self.entry(&id) else { return div().into_any_element() };
-        v_flex()
-            .size_full()
-            .items_center()
-            .gap(theme.spacing.xs)
-            .p(theme.spacing.sm)
-            .child(tile_art(e, theme))
-            .child(
-                div().w_full().flex().justify_center().child(
+        let art = crate::thumbs::tile_art(path, e, cx);
+        let theme = cx.theme();
+        let label = match field {
+            Some(field) => field,
+            None => div()
+                .w_full()
+                .flex()
+                .justify_center()
+                .child(
                     text(e.name.to_string())
                         .text_size(theme.type_scale.footnote)
                         .text_center()
                         .line_clamp(2)
                         .when(e.hidden, |t| t.text_color(theme.text.secondary)),
-                ),
-            )
-            .into_any_element()
+                )
+                .into_any_element(),
+        };
+        let tile = v_flex()
+            .size_full()
+            .items_center()
+            .gap(theme.spacing.xs)
+            .p(theme.spacing.sm)
+            .when(self.cut.contains(&id), |d| d.opacity(0.5))
+            .child(art)
+            .child(label);
+        self.file_events(tile, id, cx).into_any_element()
     }
 
     fn empty_state(&self) -> AnyElement {
@@ -884,17 +1111,6 @@ fn size_text(e: &Entry) -> String {
     }
 }
 
-/// The picture of a grid tile: the kind's icon for now; thumbnails take this slot.
-fn tile_art(e: &Entry, theme: &Theme) -> AnyElement {
-    div()
-        .flex_1()
-        .flex()
-        .items_center()
-        .justify_center()
-        .child(icon(icons::for_kind(e.file_kind), 48.).text_color(icons::tint(e.file_kind, theme)))
-        .into_any_element()
-}
-
 /// The entry of `child` when it sits directly inside `parent`: selected after going up.
 fn child_of(child: &Location, parent: &Location) -> Option<EntryId> {
     let (c, p) = (child.dir()?, parent.dir()?);
@@ -935,10 +1151,15 @@ fn recent_entries() -> flume::Receiver<Vec<(PathBuf, Entry)>> {
 }
 
 impl Render for Tab {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if let Some(id) = self.focus_next.take() {
+            window.focus(id);
+        }
+        let width = self.width;
         let theme = cx.theme();
         let me = cx.weak_entity();
         let body: AnyElement = match &self.load {
+            _ if self.extras.results.shown() => crate::results::render(self, width, cx),
             Load::Failed(e) => self.failure(e),
             Load::Slow => h_flex()
                 .w_full()
@@ -983,12 +1204,21 @@ impl Render for Tab {
                         .empty(self.empty_state())
                         .into_any_element()
                 }
+                View::Columns => crate::columns::render(self, width, cx),
             },
         };
-        let (resize, tap) = (me.clone(), me);
+        let (resize, tap, menu) = (me.clone(), me.clone(), me);
+        let banner = self.in_trash.then(|| {
+            banner("trash-banner", "Items stay in the Trash until you empty it.").action("Empty Trash").on_action(
+                |_: &BannerActionClicked, window, cx| {
+                    cx.dispatch_action(window.id(), &crate::actions::EmptyTrash);
+                },
+            )
+        });
+        let here = self.location.dir().map(Path::to_path_buf);
         div()
             .id("files")
-            .key_context(crate::actions::FILES)
+            .key_context(if self.renaming.is_some() { RENAMING } else { FILES })
             .focusable()
             .size_full()
             .flex()
@@ -999,13 +1229,331 @@ impl Render for Tab {
             .on_tap(move |_: &TapEvent, _, cx| {
                 let _ = tap.update(cx, |t, cx| t.on_tap(cx));
             })
-            .child(body)
+            .context_menu(move |m, window, cx| {
+                let Some(here) = menu.update(cx, |t, cx| t.here(window, cx)) else { return m };
+                menus::folder(m, &here)
+            })
+            .when_some(here.filter(|_| !self.in_trash), |d, dir| {
+                d.accepts_drops([DRAG_FILES]).on_drop(move |e: &Dropped, window, cx| {
+                    let dragged = PathBuf::from(e.item.id.as_ref());
+                    cx.dispatch_action(window.id(), &DropOnto { dragged, dest: dir.clone() });
+                })
+            })
+            .children(banner)
+            .child(div().flex_1().min_h_0().child(body))
     }
 }
 
 impl Tab {
     fn table_cell(&mut self, (id, col): (EntryId, usize), window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         self.cell(id, col, window, cx)
+    }
+}
+
+// File operations: what the menus and keys act on, inline rename, and selecting what a job
+// made.
+impl Tab {
+    pub fn set_window(&mut self, window: WindowId) {
+        self.window = Some(window);
+    }
+
+    fn origin(&self, cx: &mut Context<Self>) -> Option<Origin> {
+        Some(Origin { window: self.window?, tab: Some(cx.weak_entity()) })
+    }
+
+    pub fn is_trash(&self) -> bool {
+        self.in_trash
+    }
+
+    pub fn renaming(&self) -> Option<&Rename> {
+        self.renaming.as_ref()
+    }
+
+    pub fn trash_info(&self, name: &str) -> Option<&TrashInfo> {
+        self.trash_info.get(&EntryId::of(name))
+    }
+
+    pub fn cut_names(&self) -> Vec<String> {
+        self.entries.iter().filter(|e| self.cut.contains(&e.id)).map(|e| e.name.to_string()).collect()
+    }
+
+    /// The selected paths, in the order the view shows them.
+    pub fn selected_paths(&self) -> Vec<PathBuf> {
+        if self.extras.results.shown() {
+            return self.selected().iter().filter_map(|id| self.path_of(id)).collect();
+        }
+        let selected: HashSet<EntryId> = self.selected().into_iter().collect();
+        self.visible.iter().filter(|id| selected.contains(id)).filter_map(|id| self.path_of(id)).collect()
+    }
+
+    /// The one selected folder, for Paste into folder.
+    pub fn selected_folder(&self) -> Option<PathBuf> {
+        let selected = self.selected();
+        match selected.as_slice() {
+            [one] if self.is_folder(one) => self.path_of(one),
+            _ => None,
+        }
+    }
+
+    /// A right click on `id`: an unselected row takes the selection, as in Finder and GNOME
+    /// Files, and the menu acts on the selection.
+    pub fn menu_target(&mut self, id: EntryId, cx: &mut Context<Self>) -> menus::Target {
+        if !self.selected().contains(&id) {
+            self.commit_rename(cx);
+            self.select_only(id, cx);
+        }
+        let selected = self.selected();
+        let folders = selected.iter().filter(|id| self.is_folder(id)).count();
+        let archive = matches!(selected.as_slice(), [one] if self.entry(one).is_some_and(|e| e.file_kind == trove_fs::FileKind::Archive));
+        let paths = self.selected_paths();
+        if folders == 0 {
+            ops::look_up_apps(cx, paths.iter().take(1).cloned().collect());
+        }
+        menus::Target { paths, folders, archive, in_trash: self.in_trash, recent: self.location == Location::Recent }
+    }
+
+    /// A right click on empty space clears the selection and shows the folder's menu.
+    fn here(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> menus::Here {
+        self.commit_rename(cx);
+        if !self.selected().is_empty() {
+            self.list_state_mut().set_selected(Vec::new(), cx);
+            self.cursor = None;
+            cx.notify();
+        }
+        menus::Here {
+            show_hidden: self.show_hidden,
+            sort: self.sort(),
+            view: self.view,
+            in_trash: self.in_trash,
+            recent: self.location == Location::Recent,
+        }
+    }
+
+    fn bump(&mut self, id: EntryId) {
+        *self.versions.entry(id).or_insert(0) += 1;
+    }
+
+    /// Re-reads which entries here are cut and redraws the ones that changed.
+    fn sync_cut(&mut self, clip: &Entity<Clip>, cx: &mut Context<Self>) {
+        let Some(dir) = self.location.dir().map(Path::to_path_buf) else { return };
+        let now: HashSet<EntryId> = clip
+            .read(cx)
+            .cut()
+            .iter()
+            .filter(|p| p.parent() == Some(dir.as_path()))
+            .filter_map(|p| p.file_name())
+            .map(|n| EntryId::of(&n.to_string_lossy()))
+            .filter(|id| self.index.contains_key(id))
+            .collect();
+        if now == self.cut {
+            return;
+        }
+        let changed: Vec<EntryId> = now.symmetric_difference(&self.cut).copied().collect();
+        self.cut = now;
+        for id in changed {
+            self.bump(id);
+        }
+        self.sync_view(cx);
+        cx.notify();
+    }
+
+    // Inline rename.
+
+    /// F2: edits the cursor's (or the only selected) name in place.
+    pub fn start_rename(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.location == Location::Recent || self.in_trash {
+            return;
+        }
+        let Some(id) = self.target() else { return };
+        self.begin_rename(id, cx);
+        window.focus(RENAME_FIELD);
+    }
+
+    fn begin_rename(&mut self, id: EntryId, cx: &mut Context<Self>) {
+        let Some(e) = self.entry(&id) else { return };
+        let name = e.name.to_string();
+        if let Some(old) = self.renaming.take() {
+            self.bump(old.id);
+        }
+        self.renaming = Some(Rename { id, original: name.clone(), text: name.into(), error: None, job: None });
+        self.bump(id);
+        self.select_only(id, cx);
+        self.sync_view(cx);
+        cx.notify();
+    }
+
+    pub fn set_rename_text(&mut self, text: SharedString, cx: &mut Context<Self>) {
+        if let Some(r) = self.renaming.as_mut() {
+            r.text = text;
+            if r.error.take().is_some() {
+                let id = r.id;
+                self.bump(id);
+                self.sync_view(cx);
+            }
+        }
+    }
+
+    /// Enter, a click elsewhere: an unchanged name ends the edit with nothing done; a bad one
+    /// keeps the field with the reason beside it.
+    pub fn commit_rename(&mut self, cx: &mut Context<Self>) {
+        let Some(r) = self.renaming.clone() else { return };
+        if r.job.is_some() {
+            return;
+        }
+        let name = r.text.to_string();
+        if name == r.original {
+            self.end_rename(cx);
+            return;
+        }
+        let why = if name.trim().is_empty() {
+            Some("A name can\u{2019}t be empty")
+        } else if name.contains('/') {
+            Some("A name can\u{2019}t contain \u{201c}/\u{201d}")
+        } else if name == "." || name == ".." {
+            Some("That name is reserved")
+        } else {
+            None
+        };
+        if let Some(why) = why {
+            self.set_rename_error(why.to_owned(), cx);
+            return;
+        }
+        let (Some(path), Some(origin)) = (self.path_of(&r.id), self.origin(cx)) else { return };
+        let job = ops::submit(cx, origin, trove_ops::Op::Rename { path, new_name: name });
+        if let Some(r) = self.renaming.as_mut() {
+            r.job = Some(job);
+        }
+        self.bump(r.id);
+        self.sync_view(cx);
+        cx.notify();
+    }
+
+    pub fn cancel_rename(&mut self, cx: &mut Context<Self>) {
+        if self.renaming.as_ref().is_some_and(|r| r.job.is_none()) {
+            self.end_rename(cx);
+        }
+    }
+
+    fn end_rename(&mut self, cx: &mut Context<Self>) {
+        if let Some(r) = self.renaming.take() {
+            self.bump(r.id);
+            self.sync_view(cx);
+            self.focus_next = Some("files");
+            cx.notify();
+        }
+    }
+
+    fn set_rename_error(&mut self, why: String, cx: &mut Context<Self>) {
+        let Some(r) = self.renaming.as_mut() else { return };
+        r.error = Some(why);
+        r.job = None;
+        let id = r.id;
+        self.bump(id);
+        self.sync_view(cx);
+        self.focus_next = Some(RENAME_FIELD);
+        cx.notify();
+    }
+
+    /// The rename job ended; the listing's change selects the new name.
+    pub fn rename_ended(&mut self, job: trove_ops::JobId, cx: &mut Context<Self>) {
+        if self.renaming.as_ref().is_some_and(|r| r.job == Some(job)) {
+            self.end_rename(cx);
+        }
+    }
+
+    pub fn rename_failed(&mut self, job: trove_ops::JobId, error: String, cx: &mut Context<Self>) {
+        if self.renaming.as_ref().is_some_and(|r| r.job == Some(job)) {
+            // "name: reason" from the job; the field already names the item.
+            let why = error.split_once(": ").map_or(error.clone(), |(_, w)| w.to_owned());
+            self.set_rename_error(why, cx);
+        }
+    }
+
+    // Selecting what a job made.
+
+    /// Selects `paths` (all in this tab's folder) once the listing shows them, and starts a
+    /// rename on a lone new item when `rename` is set.
+    pub fn select_created(&mut self, paths: Vec<PathBuf>, rename: bool, cx: &mut Context<Self>) {
+        let ids: Vec<EntryId> =
+            paths.iter().filter_map(|p| p.file_name()).map(|n| EntryId::of(&n.to_string_lossy())).collect();
+        if ids.is_empty() {
+            return;
+        }
+        self.pending = Some(Pending { ids, rename, until: cx.now() + PENDING_FOR });
+        self.apply_pending(cx);
+    }
+
+    /// Selects the named entries that are shown, for tests and tooling.
+    pub fn select_names(&mut self, names: &[&str], cx: &mut Context<Self>) {
+        let shown: HashSet<EntryId> = self.visible.iter().copied().collect();
+        let ids: Vec<EntryId> = names.iter().map(|n| EntryId::of(n)).filter(|id| shown.contains(id)).collect();
+        let Some(&first) = ids.first() else { return };
+        self.cursor = Some(first);
+        self.anchor = Some(first);
+        self.list_state_mut().set_selected(ids, cx);
+        cx.notify();
+    }
+
+    fn apply_pending(&mut self, cx: &mut Context<Self>) {
+        let Some(p) = &self.pending else { return };
+        if cx.now() > p.until {
+            self.pending = None;
+            return;
+        }
+        let shown: HashSet<EntryId> = self.visible.iter().copied().collect();
+        let landed: Vec<EntryId> = p.ids.iter().copied().filter(|id| shown.contains(id)).collect();
+        if landed.is_empty() {
+            return;
+        }
+        let all = landed.len() == p.ids.len();
+        let rename = p.rename && all && landed.len() == 1;
+        let first = landed[0];
+        self.cursor = Some(first);
+        self.anchor = Some(first);
+        let state = self.list_state_mut();
+        state.set_selected(landed, cx);
+        state.scroll_to(first, Align::Nearest, px(0.), cx);
+        if all {
+            self.pending = None;
+        }
+        if rename {
+            self.begin_rename(first, cx);
+            self.focus_next = Some(RENAME_FIELD);
+        }
+        cx.notify();
+    }
+
+    /// Reads the `.trashinfo` of entries that have none yet.
+    fn ask_trash_info(&mut self, cx: &mut Context<Self>) {
+        let Some(dir) = self.location.dir().map(Path::to_path_buf) else { return };
+        let wanted: Vec<(EntryId, String)> = self
+            .entries
+            .iter()
+            .filter(|e| !self.trash_asked.contains(&e.id))
+            .map(|e| (e.id, e.name.to_string()))
+            .collect();
+        if wanted.is_empty() {
+            return;
+        }
+        self.trash_asked.extend(wanted.iter().map(|(id, _)| *id));
+        let generation = self.generation;
+        let names: Vec<String> = wanted.into_iter().map(|(_, n)| n).collect();
+        ops::background(
+            cx.weak_entity(),
+            move || trash::read_infos(&dir, &names),
+            move |t: &mut Tab, infos, cx| {
+                if t.generation != generation {
+                    return;
+                }
+                for (name, info) in infos {
+                    let id = EntryId::of(&name);
+                    t.trash_info.insert(id, info);
+                    t.bump(id);
+                }
+                t.sync_view(cx);
+                cx.notify();
+            },
+        );
     }
 }
 
@@ -1027,5 +1575,60 @@ impl Tab {
             let alert = Alert::new(format!("Could not open \u{201c}{name}\u{201d}")).message(e.to_string());
             window.alert(cx, alert, |_, _| {});
         }
+    }
+}
+
+// Hooks for the search results, the columns view and the thumbnails.
+impl Tab {
+    pub fn cursor(&self) -> Option<EntryId> {
+        if self.extras.results.shown() { self.extras.results.cursor() } else { self.cursor }
+    }
+
+    pub fn showing_results(&self) -> bool {
+        self.extras.results.shown()
+    }
+
+    /// Puts back a selection the search text hid.
+    pub(crate) fn restore_selection(&mut self, keys: Vec<EntryId>, cursor: Option<EntryId>, cx: &mut Context<Self>) {
+        let keys: Vec<EntryId> = keys.into_iter().filter(|k| self.visible.contains(k)).collect();
+        self.cursor = cursor.filter(|c| keys.contains(c)).or_else(|| keys.first().copied());
+        self.anchor = self.cursor;
+        let at = self.cursor;
+        let state = self.list_state_mut();
+        state.set_selected(keys, cx);
+        if let Some(id) = at {
+            state.scroll_to(id, Align::Nearest, px(0.), cx);
+        }
+        cx.notify();
+    }
+
+    /// Shows `to` without a history step, as the columns view moves between its columns,
+    /// selecting `select` once it lists.
+    pub(crate) fn retarget(&mut self, to: Location, select: Option<EntryId>, cx: &mut Context<Self>) {
+        if to == self.location {
+            return;
+        }
+        self.location = to.clone();
+        self.load(to, cx);
+        self.reveal = select;
+        self.apply_reveal(cx);
+    }
+
+    pub(crate) fn id_of_path(&self, path: &Path) -> Option<EntryId> {
+        let dir = self.location.dir()?;
+        if path.parent()? != dir {
+            return self.paths.iter().find(|(_, p)| p.as_path() == path).map(|(id, _)| *id);
+        }
+        let id = EntryId::of(&path.file_name()?.to_string_lossy());
+        self.index.contains_key(&id).then_some(id)
+    }
+
+    /// Redraws these rows alone.
+    pub(crate) fn bump_ids(&mut self, ids: &[EntryId], cx: &mut Context<Self>) {
+        for id in ids {
+            self.bump(*id);
+        }
+        self.sync_view(cx);
+        cx.notify();
     }
 }

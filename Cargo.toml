@@ -37,6 +37,10 @@ rust-version = "1.95"
 
 [dependencies]
 trove-fs.workspace = true
+trove-preview.workspace = true
+trove-search.workspace = true
+trove-ops.workspace = true
+serde = { version = "1", features = ["derive"] }
 flume.workspace = true
 jiff = "0.2"
 nd = { git = "https://github.com/FormalStudio/NativeDesktop", branch = "main" }
@@ -44,6 +48,8 @@ nd = { git = "https://github.com/FormalStudio/NativeDesktop", branch = "main" }
 [dev-dependencies]
 nd = { git = "https://github.com/FormalStudio/NativeDesktop", branch = "main", features = ["test", "audit"] }
 nd-test = { git = "https://github.com/FormalStudio/NativeDesktop", branch = "main" }
+tempfile = "3.27.0"
+image = { version = "0.25", default-features = false, features = ["png"] }
 
 [target.'cfg(target_os = "linux")'.dev-dependencies]
 ndshell = { git = "https://github.com/FormalStudio/NativeDesktop", branch = "main" }

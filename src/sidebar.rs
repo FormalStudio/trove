@@ -8,11 +8,13 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use nd::prelude::*;
-use trove_fs::{Place, Usage, Volume, VolumeKind};
+use trove_fs::{Place, PlaceIcon, Usage, Volume, VolumeKind};
 
+use crate::actions::DRAG_FILES;
 use crate::format;
 use crate::icons;
 use crate::location::Location;
+use crate::menus;
 use crate::pump::pump;
 
 type OnOpen = Rc<dyn Fn(Location, &mut Window, &mut App)>;
@@ -109,6 +111,94 @@ impl Sidebar {
         Some(Location::Dir(PathBuf::from(path)))
     }
 
+    /// Adds `path` to Bookmarks, after the ones already there. The demo keeps it in memory:
+    /// the real bookmarks file is never written from the fixture.
+    pub fn add_bookmark(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        if self.bookmarks.iter().any(|b| b.path == path) {
+            return;
+        }
+        let label = path.file_name().map_or_else(|| path.display().to_string(), |n| n.to_string_lossy().into_owned());
+        self.bookmarks.push(Place { label, path: path.clone(), icon: PlaceIcon::Folder });
+        cx.notify();
+        if crate::env::get().demo {
+            return;
+        }
+        crate::ops::background(
+            cx.weak_entity(),
+            move || trove_fs::add_bookmark(&path, None).map_err(|e| e.to_string()),
+            |_, result, _| {
+                if let Err(e) = result {
+                    eprintln!("trove: adding a bookmark: {e}");
+                }
+            },
+        );
+    }
+
+    pub fn remove_bookmark(&mut self, path: &std::path::Path, cx: &mut Context<Self>) {
+        let before = self.bookmarks.len();
+        self.bookmarks.retain(|b| b.path != path);
+        if self.bookmarks.len() == before {
+            return;
+        }
+        cx.notify();
+        if crate::env::get().demo {
+            return;
+        }
+        let path = path.to_path_buf();
+        crate::ops::background(
+            cx.weak_entity(),
+            move || trove_fs::remove_bookmark(&path).map_err(|e| e.to_string()),
+            |_, result, _| {
+                if let Err(e) = result {
+                    eprintln!("trove: removing a bookmark: {e}");
+                }
+            },
+        );
+    }
+
+    pub fn eject_mount(&mut self, mount: &std::path::Path, cx: &mut Context<Self>) {
+        self.eject(&volume_id(mount), cx);
+    }
+
+    /// What the menu acts on: the row the active tab shows.
+    fn menu_place(&self) -> Option<menus::Place> {
+        let env = crate::env::get();
+        match self.current.as_ref()? {
+            Location::Recent => Some(menus::Place::Recent),
+            Location::Dir(p) if *p == env.trash => Some(menus::Place::Trash),
+            Location::Dir(p) => {
+                if let Some(v) = self.volumes.iter().find(|v| v.mount_point == *p) {
+                    return Some(menus::Place::Volume { mount: p.clone(), ejectable: ejectable(v.kind) });
+                }
+                let bookmark = self.bookmarks.iter().any(|b| b.path == *p);
+                let place = bookmark || self.places.iter().any(|pl| pl.path == *p);
+                place.then(|| menus::Place::Folder { path: p.clone(), bookmark })
+            }
+        }
+    }
+
+    /// A row dragged into the Bookmarks section becomes a bookmark when it is a folder.
+    fn dropped(&mut self, e: &Dropped, cx: &mut Context<Self>) {
+        let into_bookmarks = e.slot.as_ref().and_then(|s| s.parent.as_deref()) == Some("bookmarks")
+            || self.bookmarks.is_empty() && e.slot.is_some();
+        if e.item.kind.as_ref() != DRAG_FILES || !into_bookmarks {
+            return;
+        }
+        let path = PathBuf::from(e.item.id.as_ref());
+        crate::ops::background(
+            cx.weak_entity(),
+            {
+                let path = path.clone();
+                move || path.is_dir()
+            },
+            move |this, is_dir, cx| {
+                if is_dir {
+                    this.add_bookmark(path, cx);
+                }
+            },
+        );
+    }
+
     fn eject(&mut self, id: &str, cx: &mut Context<Self>) {
         let Some(mount) = id.strip_prefix("volume:").map(PathBuf::from) else { return };
         let Some(volume) = self.volumes.iter().find(|v| v.mount_point == mount).cloned() else { return };
@@ -192,8 +282,12 @@ fn volume_label(v: &Volume) -> String {
 
 impl Render for Sidebar {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let (open, act) = (cx.weak_entity(), cx.weak_entity());
-        source_tree("places")
+        let (open, act, drop) = (cx.weak_entity(), cx.weak_entity(), cx.weak_entity());
+        let place = self.menu_place();
+        // nd: source_tree has no per-row context menu and takes drops only between rows
+        // (`Dropped.slot`), so the menu acts on the row the active tab shows and a file
+        // dropped on a place cannot be moved into it.
+        let tree = source_tree("places")
             .nodes(self.nodes())
             .actions([source_action(EJECT, icons::eject()).tooltip("Eject")])
             .selected_opt(self.current.as_ref().and_then(|l| self.id_for(l)))
@@ -208,5 +302,14 @@ impl Render for Sidebar {
                     let _ = act.update(cx, |this, cx| this.eject(&e.id, cx));
                 }
             })
+            .accepts_drops([DRAG_FILES])
+            .on_drop(move |e: &Dropped, _, cx| {
+                let _ = drop.update(cx, |this, cx| this.dropped(e, cx));
+            });
+        div()
+            .id("places-menu")
+            .size_full()
+            .child(tree)
+            .context_menu(move |menu, _, _| menus::sidebar(menu, place.as_ref()))
     }
 }

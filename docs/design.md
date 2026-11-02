@@ -325,10 +325,22 @@ index is over 5 minutes old a query also walks its scope 3 levels deep to catch 
   first, natural order, folders expandable inline (disclosure, Right/Left keys) like Finder.
 - Grid view: icons with thumbnails, filled in as they arrive.
 - Columns view: Finder's Miller columns, one `list` per level, the last column the preview.
-- Preview pane: the selection's preview and its info; Space opens Quick Look (a large sheet with
-  the same content, arrows step through the selection, Space or Escape closes).
+- Preview pane: the selection's preview and its info, loaded 60 ms after the selection settles;
+  several selected show their count and total size. Space opens Quick Look (a cover over the
+  window with the same content larger and "Open with <app>"; arrows step through the selection,
+  or through the folder with one selected; Space or Escape closes).
+- Search results: from the second character, a recursive search of the folder (or Home, by the
+  scope switch) replaces the listing with Name (matches in the accent), Folder, Kind, Modified.
+  The preview follows the result selection; Escape puts the folder back with its selection.
 - Status bar: item count, selection count and size, free space, running jobs with progress and
-  cancel. Conflicts open a sheet: Replace, Skip, Keep both, Apply to all.
+  cancel. Conflicts open a sheet: Replace (Merge for two folders), Skip, Keep both, Apply to
+  all, Cancel. A failure shows as a toast with the reason.
+- Context menus: on files (Open, Open with, Cut, Copy, Duplicate, Rename, Compress, Move to
+  Trash, and Restore in the Trash), on empty space (New folder, New file, Paste, Show hidden,
+  Sort by, View), on the sidebar and on the tab strip. The Trash lists Original location and
+  Date deleted from `.trashinfo`, under a banner with Empty Trash.
+- Drag and drop: rows and tiles onto folders, breadcrumb segments and the folder shown; one
+  file system moves, another copies. Files dropped from other apps land in the folder shown.
 
 ### Keys
 
@@ -342,10 +354,13 @@ index is over 5 minutes old a query also walks its scope 3 levels deep to catch 
 | Alt+Down | open the selected folder |
 | Ctrl+C, Ctrl+X, Ctrl+V | copy, cut, paste (Ctrl+Shift+V pastes into the selected folder) |
 | Ctrl+Z, Ctrl+Shift+Z | undo, redo |
-| Delete | move to Trash; Shift+Delete deletes after a confirm |
+| Delete | move to Trash (in the Trash, delete after a confirm); Shift+Delete deletes after a confirm |
+| Ctrl+Backspace, in the Trash | restore to the original location |
 | Ctrl+Shift+N | new folder, named inline |
 | Ctrl+D | duplicate |
 | Ctrl+F | search; Escape clears and returns to the folder |
+| Down, in the search field | into the results |
+| Ctrl+Enter, Alt+Enter, on a result | show in its enclosing folder, selected |
 | Ctrl+L | edit the path |
 | Ctrl+H | show hidden files (per window, remembered) |
 | Ctrl+1, Ctrl+2, Ctrl+3 | list, grid, columns view |
@@ -361,7 +376,10 @@ produced.
 
 ## State
 
-Settings through `nd-settings` (`~/.config/trove/settings.toml`): show hidden, folders first,
-default view, single-click to open, search exclusions, thumbnails on network mounts. Session in
-the app's state dir: the open tabs with their paths, views and sorts, the window size, the
-sidebar and preview widths. Restored at launch without waiting on any of the paths.
+Settings through `nd-settings` (`~/.config/trove/config.toml`): show hidden, folders first,
+default view, single-click to open, confirm before trash (off), search exclusions, thumbnails
+on network mounts (off). Session in `$XDG_STATE_HOME/trove/session.json`, written a moment after
+each change on its own thread: the open tabs with their paths, views and sorts, the active tab,
+the window size and whether the preview shows. Restored at launch, when no path is given,
+without waiting on any of the paths. The sidebar and preview widths are not kept: nd's panes
+report no width change yet.
