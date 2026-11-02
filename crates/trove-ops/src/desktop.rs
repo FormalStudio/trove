@@ -515,6 +515,15 @@ impl<'a> Script<'a> {
     }
 
     fn reference(&mut self, out: &mut String, value: String) {
+        // A backslash right before the code would escape the reference's own first quote. Read it
+        // as the shell would have read it before a file name: dropped when bare, literal in quotes.
+        if std::mem::take(&mut self.escaped) {
+            if self.state == Quoting::Bare {
+                out.pop();
+            } else {
+                out.push('\\');
+            }
+        }
         let name = format!("TROVE_ARG_{}", self.env.len() + 1);
         let quote = match self.state {
             Quoting::Bare => "",
@@ -731,6 +740,14 @@ mod shell_tests {
         // A backslash escapes the quote inside fish's single quotes and not inside sh's.
         assert_eq!(script(r#"fish -c "echo '\\' %f""#), r#"echo '\' '"$TROVE_ARG_1"'"#);
         assert_eq!(script(r#"sh -c "echo '\\' %f""#), r#"echo '\' "$TROVE_ARG_1""#);
+    }
+
+    #[test]
+    fn a_backslash_before_a_code_leaves_the_reference_whole() {
+        let name = [PathBuf::from("/q")];
+        let script = |exec: &str| expand_exec(&app(exec), &name).unwrap().remove(0).argv.pop().unwrap();
+        assert_eq!(script(r#"sh -c "echo \\%f '%f'""#), r#"echo "$TROVE_ARG_1" ''"$TROVE_ARG_2"''"#);
+        assert_eq!(script(r#"sh -c "echo \"\\%f\" %f""#), r#"echo "\\""$TROVE_ARG_1""" "$TROVE_ARG_2""#);
     }
 
     #[test]

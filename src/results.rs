@@ -338,7 +338,7 @@ impl Results {
 }
 
 fn id_of(path: &Path) -> EntryId {
-    EntryId::of(&path.to_string_lossy())
+    EntryId::of(path)
 }
 
 fn row_of(path: PathBuf, is_dir: bool, matches: Vec<(u32, u32)>, home: &Path) -> Row {

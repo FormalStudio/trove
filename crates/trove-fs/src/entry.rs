@@ -1,29 +1,29 @@
+use std::borrow::Cow;
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
-use std::hash::{BuildHasherDefault, Hasher};
+use std::ffi::OsStr;
+use std::hash::{BuildHasher, BuildHasherDefault, Hasher, RandomState};
+use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 use std::time::SystemTime;
 
-/// Stable key for one name inside one directory: the list's row key. A hash of the name, so it
-/// survives re-listing and re-sorting.
+/// Key for one name inside one directory: the list's row key. A hash of the name's bytes, so it
+/// survives re-listing and re-sorting, keyed per process so names cannot be crafted to collide.
+/// Never persist one: the next run hashes with another key.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct EntryId(pub u64);
 
+static ID_KEY: LazyLock<RandomState> = LazyLock::new(RandomState::new);
+
 impl EntryId {
-    pub fn of(name: &str) -> Self {
-        // FNV-1a: fast, stable across runs (std's SipHash keys are random per process).
-        let mut h: u64 = 0xcbf2_9ce4_8422_2325;
-        for b in name.as_bytes() {
-            h ^= u64::from(*b);
-            h = h.wrapping_mul(0x0100_0000_01b3);
-        }
-        Self(h)
+    pub fn of(name: impl AsRef<OsStr>) -> Self {
+        Self(ID_KEY.hash_one(name.as_ref().as_bytes()))
     }
 }
 
-/// Hashes an [`EntryId`], which is already a hash of the name, with one mixing step instead of
-/// SipHash: a 100k-entry folder rebuilds its maps on every sort and filter.
+/// Hashes an [`EntryId`], which is already a keyed hash of the name, with one mixing step instead
+/// of SipHash: a 100k-entry folder rebuilds its maps on every sort and filter.
 #[derive(Clone, Copy, Default)]
 pub struct IdHasher(u64);
 
@@ -88,7 +88,10 @@ pub struct Meta {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Entry {
     pub id: EntryId,
+    /// The name for display, lossy where the bytes on disk are not UTF-8.
     pub name: Arc<str>,
+    /// The bytes on disk, kept only when `name` lost some.
+    pub raw_name: Option<Arc<OsStr>>,
     /// From the directory entry's d_type, so known before any stat.
     pub kind: EntryKind,
     pub file_kind: FileKind,
@@ -100,10 +103,15 @@ pub struct Entry {
 }
 
 impl Entry {
-    pub fn new(name: &str, kind: EntryKind) -> Self {
+    pub fn new(raw: impl AsRef<OsStr>, kind: EntryKind) -> Self {
+        let raw = raw.as_ref();
+        let lossy = raw.to_string_lossy();
+        let raw_name = matches!(lossy, Cow::Owned(_)).then(|| Arc::from(raw));
+        let name = &*lossy;
         Self {
-            id: EntryId::of(name),
+            id: EntryId::of(raw),
             name: Arc::from(name),
+            raw_name,
             kind,
             file_kind: if kind.is_dir() { FileKind::Folder } else { FileKind::from_name(name) },
             hidden: name.starts_with('.') || name.ends_with('~'),
@@ -112,12 +120,17 @@ impl Entry {
         }
     }
 
+    /// The name as it is on disk, for building paths.
+    pub fn raw_name(&self) -> &OsStr {
+        self.raw_name.as_deref().unwrap_or_else(|| OsStr::new(&*self.name))
+    }
+
     pub fn is_dir(&self) -> bool {
         self.meta.as_ref().map_or(self.kind, |m| m.kind).is_dir()
     }
 
     pub fn path_in(&self, dir: &Path) -> PathBuf {
-        dir.join(&*self.name)
+        dir.join(self.raw_name())
     }
 
     /// Lowercased extension without the dot, empty for none or for a dotfile like `.bashrc`.

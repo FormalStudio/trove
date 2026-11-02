@@ -187,13 +187,9 @@ fn stat(path: &Path) -> io::Result<(EntryKind, Meta)> {
     Ok((raw, meta))
 }
 
-fn name_string(name: &OsStr) -> String {
-    name.to_string_lossy().into_owned()
-}
-
 fn make_entry(dir: &Path, name: &OsStr) -> io::Result<Entry> {
     let (raw, meta) = stat(&dir.join(name))?;
-    let mut entry = Entry::new(&name_string(name), raw);
+    let mut entry = Entry::new(name, raw);
     entry.meta = Some(meta);
     Ok(entry)
 }
@@ -242,7 +238,7 @@ fn run(dir: &Path, ctx: &Ctx) {
             }
         };
         let kind = de.file_type().map_or(EntryKind::Other, kind_of);
-        let entry = Entry::new(&name_string(&de.file_name()), kind);
+        let entry = Entry::new(de.file_name(), kind);
         if watcher.is_some() {
             known.push(entry.id);
         }
@@ -284,7 +280,7 @@ fn flush(chunk: &mut Vec<Entry>, ctx: &Ctx, pool: &mut Pool) -> bool {
     true
 }
 
-type Job = Vec<(EntryId, Arc<str>)>;
+type Job = Vec<(EntryId, Arc<str>, Option<Arc<OsStr>>)>;
 
 /// Stats run on up to 8 threads locally and 2 on network file systems, started as work arrives so
 /// a small directory costs one thread.
@@ -317,7 +313,10 @@ impl Pool {
 
     fn jobs_for(&self, entries: &[Entry]) -> Vec<Job> {
         let statted: Vec<&Entry> = entries.iter().filter(|e| !self.unstatted.contains(&*e.name)).collect();
-        statted.chunks(self.job_size).map(|c| c.iter().map(|e| (e.id, e.name.clone())).collect()).collect()
+        statted
+            .chunks(self.job_size)
+            .map(|c| c.iter().map(|e| (e.id, e.name.clone(), e.raw_name.clone())).collect())
+            .collect()
     }
 
     fn submit(&mut self, jobs: Vec<Job>) {
@@ -336,12 +335,12 @@ impl Pool {
         let handle = std::thread::Builder::new().name("trove-stat".into()).spawn(move || {
             while let Ok(job) = rx.recv() {
                 let mut metas = Vec::with_capacity(job.len());
-                for (id, name) in job {
+                for (id, name, raw) in job {
                     if ctx.cancel.is_set() {
                         return;
                     }
                     // A name that vanished since readdir has no meta; the watcher reports its removal.
-                    if let Ok((_, meta)) = stat(&dir.join(&*name)) {
+                    if let Ok((_, meta)) = stat(&dir.join(raw.as_deref().unwrap_or_else(|| OsStr::new(&*name)))) {
                         metas.push((id, meta));
                     }
                 }
@@ -362,7 +361,11 @@ impl Pool {
             while let Ok(job) = self.jobs_rx.try_recv() {
                 let metas: Vec<_> = job
                     .into_iter()
-                    .filter_map(|(id, n)| stat(&self.dir.join(&*n)).ok().map(|(_, m)| (id, m)))
+                    .filter_map(|(id, n, raw)| {
+                        stat(&self.dir.join(raw.as_deref().unwrap_or_else(|| OsStr::new(&*n))))
+                            .ok()
+                            .map(|(_, m)| (id, m))
+                    })
                     .collect();
                 if !self.ctx.send(ListEvent::Meta(metas)) {
                     return;
@@ -506,7 +509,7 @@ impl Batch {
         }
         let mut handled: HashSet<OsString> = HashSet::new();
         for (from, to) in &self.renames {
-            let (from_id, to_id) = (EntryId::of(&name_string(from)), EntryId::of(&name_string(to)));
+            let (from_id, to_id) = (EntryId::of(from), EntryId::of(to));
             if !known.contains(&from_id) || known.contains(&to_id) || handled.contains(from) || handled.contains(to) {
                 continue;
             }
@@ -524,7 +527,7 @@ impl Batch {
             if handled.contains(name) {
                 continue;
             }
-            let id = EntryId::of(&name_string(name));
+            let id = EntryId::of(name);
             match make_entry(dir, name) {
                 Ok(entry) => {
                     let meta = entry.meta.clone();
@@ -551,7 +554,7 @@ impl Batch {
         let mut present = HashSet::new();
         for de in rd.flatten() {
             let name = de.file_name();
-            present.insert(EntryId::of(&name_string(&name)));
+            present.insert(EntryId::of(&name));
             self.touch(&name);
         }
         let gone: Vec<EntryId> = known.iter().filter(|id| !present.contains(id)).copied().collect();
@@ -706,6 +709,25 @@ mod tests {
         assert_eq!(by_name["broken"].1.kind, EntryKind::Symlink { to_dir: false, broken: true });
         assert!(by_name["to_dir"].1.kind.is_dir() && !by_name["broken"].1.kind.is_dir());
         assert!(by_name["a.txt"].1.modified.is_some());
+    }
+
+    #[test]
+    fn a_name_that_is_not_utf8_keeps_its_bytes() {
+        use std::os::unix::ffi::OsStrExt;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let latin1 = OsStr::from_bytes(b"caf\xe9.txt");
+        fs::write(dir.path().join(latin1), b"latin-1").expect("write");
+        fs::write(dir.path().join("caf\u{fffd}.txt"), b"replacement").expect("write");
+        let c = collect_until_complete(&list(dir.path().to_path_buf(), ListOptions::default()).events);
+        let entries: Vec<&Entry> = c.entries.iter().flatten().collect();
+        assert_eq!(entries.len(), 2);
+        assert_ne!(entries[0].id, entries[1].id);
+        for e in entries {
+            assert_eq!(&*e.name, "caf\u{fffd}.txt");
+            let on_disk = fs::read(e.path_in(dir.path())).expect("path_in reaches the entry's own file");
+            assert_eq!(c.metas[&e.id].size, on_disk.len() as u64);
+            assert_eq!(e.raw_name() == latin1, on_disk == b"latin-1");
+        }
     }
 
     #[test]

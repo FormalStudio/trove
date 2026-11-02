@@ -1,7 +1,7 @@
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufWriter, Read, Write};
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
@@ -157,12 +157,20 @@ fn extract_into(ctx: &mut Ctx, archive: &Path, name: &str, staging: &Path) -> R<
     if is_zip(name) {
         return extract_zip(ctx, archive, staging);
     }
+    // Both refuse absolute and ".." members by default and never extract through a symlink the
+    // archive made (GNU tar holds such links back as placeholders), as long as -P is never passed.
     if let Some(bsdtar) = find_in_path("bsdtar") {
-        return run_tool(ctx, Command::new(bsdtar).arg("-xf").arg(archive).arg("-C").arg(staging));
+        return run_tool(
+            ctx,
+            Command::new(bsdtar).arg("--no-same-owner").arg("-xf").arg(archive).arg("-C").arg(staging),
+        );
     }
     if is_tar(name) {
         if let Some(tar) = find_in_path("tar") {
-            return run_tool(ctx, Command::new(tar).arg("-xf").arg(archive).arg("-C").arg(staging));
+            return run_tool(
+                ctx,
+                Command::new(tar).arg("--no-same-owner").arg("-xf").arg(archive).arg("-C").arg(staging),
+            );
         }
         return fail(format!("Cannot extract \"{name}\": tar is not installed"));
     }
@@ -210,9 +218,13 @@ fn extract_zip(ctx: &mut Ctx, archive: &Path, staging: &Path) -> R<()> {
     for i in 0..zip.len() {
         ctx.check_cancel()?;
         let mut entry = zip.by_index(i).map_err(zip_err)?;
+        let unsafe_path = || fail(format!("Unsafe path in archive: {}", entry.name().unwrap_or_default()));
         let Some(rel) = entry.enclosed_name() else {
-            return fail(format!("Unsafe path in archive: {}", entry.name().unwrap_or_default()));
+            return unsafe_path();
         };
+        if !rel.components().all(|c| matches!(c, Component::Normal(_))) || through_symlink(staging, &rel) {
+            return unsafe_path();
+        }
         let out = staging.join(rel);
         ctx.set_current(&out);
         if entry.is_dir() {
@@ -226,8 +238,13 @@ fn extract_zip(ctx: &mut Ctx, archive: &Path, staging: &Path) -> R<()> {
                 entry.read_to_string(&mut target).at(&out)?;
                 std::os::unix::fs::symlink(target, &out).at(&out)?;
             } else {
-                let mut f =
-                    OpenOptions::new().write(true).create(true).truncate(true).mode(0o600).open(&out).at(&out)?;
+                let mut f = OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .mode(0o600)
+                    .custom_flags(libc::O_NOFOLLOW)
+                    .open(&out)
+                    .at(&out)?;
                 let mut buf = vec![0u8; CHUNK.min(256 * 1024)];
                 loop {
                     ctx.check_cancel()?;
@@ -246,6 +263,16 @@ fn extract_zip(ctx: &mut Ctx, archive: &Path, staging: &Path) -> R<()> {
         ctx.finish_item();
     }
     Ok(())
+}
+
+/// Whether any part of `rel` under `staging` is a symlink an earlier entry made, which writing
+/// through would land outside staging.
+fn through_symlink(staging: &Path, rel: &Path) -> bool {
+    let mut at = staging.to_path_buf();
+    rel.components().any(|c| {
+        at.push(c);
+        fs::symlink_metadata(&at).is_ok_and(|m| m.file_type().is_symlink())
+    })
 }
 
 /// A single top-level entry goes straight into `dest_dir`; anything else lands in a new folder

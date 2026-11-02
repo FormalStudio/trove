@@ -123,14 +123,26 @@ pub(crate) fn transfer(ctx: &mut Ctx, mode: Mode, items: &[(PathBuf, PathBuf)]) 
         match mode {
             Mode::Copy => copy_entry(ctx, src, &dest, replace)?,
             Mode::Move => {
+                let skipped = ctx.skipped;
                 move_entry(ctx, src, &dest, replace)?;
-                ctx.pairs.push((src.clone(), dest.clone()));
+                if ctx.skipped == skipped {
+                    ctx.pairs.push((src.clone(), dest.clone()));
+                }
             }
         }
         ctx.created.push(dest);
     }
     ctx.progress(true);
-    Ok(())
+    if mode == Mode::Move { left_in_place(ctx) } else { Ok(()) }
+}
+
+/// Fails a move that kept sources back because a copy across file systems skipped special files.
+fn left_in_place(ctx: &Ctx) -> R<()> {
+    match ctx.skipped {
+        0 => Ok(()),
+        1 => fail("Left 1 special file in place"),
+        n => fail(format!("Left {n} special files in place")),
+    }
 }
 
 /// Moves `src` to exactly `dest`, which must not exist.
@@ -146,17 +158,21 @@ pub(crate) fn move_exact(ctx: &mut Ctx, pairs: &[(PathBuf, PathBuf)]) -> R<()> {
         if let Some(parent) = to.parent() {
             ensure_dir(parent).at(parent)?;
         }
+        let skipped = ctx.skipped;
         move_entry(ctx, from, to, false)?;
-        ctx.pairs.push((from.clone(), to.clone()));
+        if ctx.skipped == skipped {
+            ctx.pairs.push((from.clone(), to.clone()));
+        }
         ctx.created.push(to.clone());
     }
     ctx.progress(true);
-    Ok(())
+    left_in_place(ctx)
 }
 
 /// `rename(2)` when it works; across file systems a full copy, then the source goes only once
-/// every byte landed. With `replace`, an existing folder is merged into, and an existing file
-/// overwritten.
+/// every byte landed (and stays when the copy skipped a special file). With `replace`, an
+/// existing folder is merged into, and an existing file overwritten; without it an existing
+/// `dest` fails the move.
 pub(crate) fn move_entry(ctx: &mut Ctx, src: &Path, dest: &Path, replace: bool) -> R<()> {
     ctx.check_cancel()?;
     let sm = meta(src)?;
@@ -179,17 +195,55 @@ pub(crate) fn move_entry(ctx: &mut Ctx, src: &Path, dest: &Path, replace: bool) 
             (false, false) => {}
         }
     }
-    match fs::rename(src, dest) {
+    #[cfg(test)]
+    let forced = ctx.force_exdev;
+    #[cfg(not(test))]
+    let forced = false;
+    let renamed = if forced {
+        Err(io::Error::from_raw_os_error(libc::EXDEV))
+    } else if replace {
+        fs::rename(src, dest)
+    } else {
+        rename_noreplace(src, dest)
+    };
+    match renamed {
         Ok(()) => {
             ctx.finish_item();
             Ok(())
         }
         Err(e) if e.raw_os_error() == Some(libc::EXDEV) => {
-            copy_entry(ctx, src, dest, false)?;
-            remove_all(src).at(src)
+            let skipped = ctx.skipped;
+            copy_entry(ctx, src, dest, replace)?;
+            if ctx.skipped == skipped { remove_all(src).at(src) } else { Ok(()) }
         }
+        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => fail(format!("\"{}\" already exists", name_of(dest))),
         Err(e) => Err(e).at(src),
     }
+}
+
+/// `rename(2)` that fails with `AlreadyExists` rather than replace `to`. A file system without
+/// `RENAME_NOREPLACE` gets a check, then a plain rename.
+pub(crate) fn rename_noreplace(from: &Path, to: &Path) -> io::Result<()> {
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        let a = std::ffi::CString::new(from.as_os_str().as_bytes())?;
+        let b = std::ffi::CString::new(to.as_os_str().as_bytes())?;
+        // SAFETY: both paths are NUL-terminated and live across the call.
+        let rc =
+            unsafe { libc::renameat2(libc::AT_FDCWD, a.as_ptr(), libc::AT_FDCWD, b.as_ptr(), libc::RENAME_NOREPLACE) };
+        if rc == 0 {
+            return Ok(());
+        }
+        let e = io::Error::last_os_error();
+        if !matches!(e.raw_os_error(), Some(libc::EINVAL | libc::ENOSYS)) {
+            return Err(e);
+        }
+    }
+    if exists(to) {
+        return Err(io::Error::from(io::ErrorKind::AlreadyExists));
+    }
+    fs::rename(from, to)
 }
 
 pub(crate) fn remove_all(path: &Path) -> io::Result<()> {
@@ -235,6 +289,9 @@ pub(crate) fn copy_entry(ctx: &mut Ctx, src: &Path, dest: &Path, replace: bool) 
         ctx.finish_item();
     } else if ft.is_file() {
         copy_file(ctx, src, dest, replace, &m)?;
+        ctx.finish_item();
+    } else {
+        ctx.skipped += 1;
         ctx.finish_item();
     }
     Ok(())
@@ -431,12 +488,15 @@ pub(crate) fn rename(ctx: &mut Ctx, path: &Path, new_name: &str) -> R<()> {
         ctx.created.push(path.to_path_buf());
         return Ok(());
     }
-    if let Ok(tm) = fs::symlink_metadata(&target)
-        && !(tm.dev() == m.dev() && tm.ino() == m.ino())
-    {
-        return fail(format!("\"{name}\" already exists"));
+    let renamed = match fs::symlink_metadata(&target) {
+        Ok(tm) if tm.dev() == m.dev() && tm.ino() == m.ino() => fs::rename(path, &target),
+        Ok(_) => return fail(format!("\"{name}\" already exists")),
+        Err(_) => rename_noreplace(path, &target),
+    };
+    match renamed {
+        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => return fail(format!("\"{name}\" already exists")),
+        r => r.at(path)?,
     }
-    fs::rename(path, &target).at(path)?;
     ctx.pairs.push((path.to_path_buf(), target.clone()));
     ctx.created.push(target);
     Ok(())
@@ -474,6 +534,7 @@ mod tests {
     use crate::job::Stop;
     use crate::trash::TrashConfig;
     use crate::{JobId, OpEvent};
+    use std::os::unix::fs::FileTypeExt;
     use std::sync::Arc;
     use std::sync::atomic::AtomicBool;
 
@@ -544,6 +605,60 @@ mod tests {
         assert_eq!(fs::read_link(dest.join("link")).unwrap(), PathBuf::from("a.txt"));
         assert_eq!(fs::read_link(dest.join("dangling")).unwrap(), PathBuf::from("missing"));
         fs::set_permissions(dest.join("sub/deep"), fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    #[test]
+    fn cross_device_replace_merges_and_overwrites() {
+        let d = tempfile::tempdir().unwrap();
+        let (src, dest) = (d.path().join("src"), d.path().join("dest"));
+        fs::create_dir_all(src.join("sub")).unwrap();
+        fs::create_dir_all(dest.join("sub")).unwrap();
+        fs::write(src.join("a.txt"), "new").unwrap();
+        fs::write(src.join("sub/b.txt"), "new b").unwrap();
+        fs::write(dest.join("a.txt"), "old").unwrap();
+        fs::write(dest.join("sub/b.txt"), "old b").unwrap();
+        fs::write(dest.join("keep.txt"), "kept").unwrap();
+        let (mut c, _rx) = ctx();
+        c.force_exdev = true;
+        move_entry(&mut c, &src, &dest, true).unwrap();
+        assert!(!src.exists());
+        assert_eq!(fs::read_to_string(dest.join("a.txt")).unwrap(), "new");
+        assert_eq!(fs::read_to_string(dest.join("sub/b.txt")).unwrap(), "new b");
+        assert_eq!(fs::read_to_string(dest.join("keep.txt")).unwrap(), "kept");
+    }
+
+    #[test]
+    fn cross_device_move_keeps_a_source_holding_special_files() {
+        let d = tempfile::tempdir().unwrap();
+        let src = d.path().join("tree");
+        fs::create_dir(&src).unwrap();
+        fs::write(src.join("a.txt"), "alpha").unwrap();
+        let fifo = std::ffi::CString::new(src.join("pipe").into_os_string().into_encoded_bytes()).unwrap();
+        // SAFETY: a NUL-terminated path.
+        assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) }, 0);
+        let out = d.path().join("out");
+        fs::create_dir(&out).unwrap();
+        let (mut c, _rx) = ctx();
+        c.force_exdev = true;
+        match transfer(&mut c, Mode::Move, &[(src.clone(), out.clone())]) {
+            Err(Stop::Failed(msg)) => assert_eq!(msg, "Left 1 special file in place"),
+            other => panic!("expected a failure, got {other:?}"),
+        }
+        assert!(fs::symlink_metadata(src.join("pipe")).unwrap().file_type().is_fifo());
+        assert_eq!(fs::read_to_string(out.join("tree/a.txt")).unwrap(), "alpha");
+        assert!(c.pairs.is_empty(), "nothing to move back");
+    }
+
+    #[test]
+    fn a_move_without_replace_never_overwrites() {
+        let d = tempfile::tempdir().unwrap();
+        let (a, b) = (d.path().join("a"), d.path().join("b"));
+        fs::write(&a, "a").unwrap();
+        fs::write(&b, "b").unwrap();
+        let (mut c, _rx) = ctx();
+        assert!(matches!(move_entry(&mut c, &a, &b, false), Err(Stop::Failed(m)) if m.contains("already exists")));
+        assert_eq!(fs::read_to_string(&b).unwrap(), "b");
+        assert!(a.exists());
     }
 
     #[test]

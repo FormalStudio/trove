@@ -3,6 +3,7 @@
 //! whatever observes it (the status bar, the preview), never the sidebar or the other tabs.
 
 use std::collections::{HashMap, HashSet};
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::time::Duration;
@@ -340,7 +341,7 @@ impl Tab {
 
     /// Opens `dir` with `file` selected in it: a file path given on the command line.
     pub fn reveal_in(&mut self, file: &Path, cx: &mut Context<Self>) {
-        self.reveal = file.file_name().map(|n| EntryId::of(&n.to_string_lossy()));
+        self.reveal = file.file_name().map(EntryId::of);
         self.apply_reveal(cx);
     }
 
@@ -1280,7 +1281,7 @@ fn size_text(e: &Entry) -> String {
 /// The entry of `child` when it sits directly inside `parent`: selected after going up.
 fn child_of(child: &Location, parent: &Location) -> Option<EntryId> {
     let (c, p) = (child.dir()?, parent.dir()?);
-    (c.parent()? == p).then(|| c.file_name().map(|n| EntryId::of(&n.to_string_lossy()))).flatten()
+    (c.parent()? == p).then(|| c.file_name().map(EntryId::of)).flatten()
 }
 
 /// Recent's entries, stat'd on a thread of their own: the list never touches the disk on the
@@ -1293,10 +1294,9 @@ fn recent_entries() -> flume::Receiver<Vec<(PathBuf, Entry)>> {
             .into_iter()
             .filter_map(|path| {
                 let md = std::fs::metadata(&path).ok()?;
-                let name = path.file_name()?.to_string_lossy().into_owned();
                 let kind = if md.is_dir() { EntryKind::Dir } else { EntryKind::File };
-                let mut entry = Entry::new(&name, kind);
-                entry.id = EntryId::of(&path.to_string_lossy());
+                let mut entry = Entry::new(path.file_name()?, kind);
+                entry.id = EntryId::of(&path);
                 entry.meta = Some(Meta {
                     size: md.len(),
                     modified: md.modified().ok(),
@@ -1532,7 +1532,7 @@ impl Tab {
             .iter()
             .filter(|p| p.parent() == Some(dir.as_path()))
             .filter_map(|p| p.file_name())
-            .map(|n| EntryId::of(&n.to_string_lossy()))
+            .map(EntryId::of)
             .filter(|id| self.index.contains_key(id))
             .collect();
         if now == self.cut {
@@ -1664,8 +1664,7 @@ impl Tab {
     /// Selects `paths` (all in this tab's folder) once the listing shows them, and starts a
     /// rename on a lone new item when `rename` is set.
     pub fn select_created(&mut self, paths: Vec<PathBuf>, rename: bool, cx: &mut Context<Self>) {
-        let ids: Vec<EntryId> =
-            paths.iter().filter_map(|p| p.file_name()).map(|n| EntryId::of(&n.to_string_lossy())).collect();
+        let ids: Vec<EntryId> = paths.iter().filter_map(|p| p.file_name()).map(EntryId::of).collect();
         if ids.is_empty() {
             return;
         }
@@ -1676,7 +1675,7 @@ impl Tab {
     /// Selects the named entries that are shown, for tests and tooling.
     pub fn select_names(&mut self, names: &[&str], cx: &mut Context<Self>) {
         let shown: HashSet<EntryId> = self.visible.iter().copied().collect();
-        let ids: Vec<EntryId> = names.iter().map(|n| EntryId::of(n)).filter(|id| shown.contains(id)).collect();
+        let ids: Vec<EntryId> = names.iter().map(EntryId::of).filter(|id| shown.contains(id)).collect();
         let Some(&first) = ids.first() else { return };
         self.cursor = Some(first);
         self.list_state_mut().set_selected(ids, cx);
@@ -1714,18 +1713,18 @@ impl Tab {
     /// Reads the `.trashinfo` of entries that have none yet.
     fn ask_trash_info(&mut self, cx: &mut Context<Self>) {
         let Some(dir) = self.location.dir().map(Path::to_path_buf) else { return };
-        let wanted: Vec<(EntryId, String)> = self
+        let wanted: Vec<(EntryId, OsString)> = self
             .entries
             .iter()
             .filter(|e| !self.trash_asked.contains(&e.id))
-            .map(|e| (e.id, e.name.to_string()))
+            .map(|e| (e.id, e.raw_name().to_os_string()))
             .collect();
         if wanted.is_empty() {
             return;
         }
         self.trash_asked.extend(wanted.iter().map(|(id, _)| *id));
         let generation = self.generation;
-        let names: Vec<String> = wanted.into_iter().map(|(_, n)| n).collect();
+        let names: Vec<OsString> = wanted.into_iter().map(|(_, n)| n).collect();
         ops::background(
             cx.weak_entity(),
             move || trash::read_infos(&dir, &names),
@@ -1798,7 +1797,7 @@ impl Tab {
         if path.parent()? != dir {
             return self.paths.iter().find(|(_, p)| p.as_path() == path).map(|(id, _)| *id);
         }
-        let id = EntryId::of(&path.file_name()?.to_string_lossy());
+        let id = EntryId::of(path.file_name()?);
         self.index.contains_key(&id).then_some(id)
     }
 

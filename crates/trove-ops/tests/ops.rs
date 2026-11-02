@@ -620,6 +620,24 @@ fn zip_of_several_items_extracts_into_a_named_folder() {
 }
 
 #[test]
+fn zip_entries_never_write_through_the_archives_own_symlinks() {
+    use std::io::Write;
+    let r = rig();
+    let outside = r.dir("outside");
+    let mut zip = zip::ZipWriter::new(fs::File::create(r.p("evil.zip")).unwrap());
+    let opts = zip::write::SimpleFileOptions::default();
+    zip.add_symlink("link", outside.to_string_lossy(), opts).unwrap();
+    zip.start_file("link/.bashrc", opts).unwrap();
+    zip.write_all(b"pwned").unwrap();
+    zip.finish().unwrap();
+    let out = r.dir("out");
+    let e = r.run(Op::Extract { archive: r.p("evil.zip"), dest_dir: out.clone() }).error();
+    assert_eq!(e, "Unsafe path in archive: link/.bashrc");
+    assert!(names(&outside).is_empty(), "nothing written outside staging");
+    assert!(names(&out).is_empty(), "no staging left behind");
+}
+
+#[test]
 fn extract_tar_gz_with_the_system_tar() {
     let r = rig();
     if std::env::var_os("PATH").is_none_or(|p| !std::env::split_paths(&p).any(|d| d.join("tar").is_file())) {

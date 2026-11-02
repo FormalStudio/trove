@@ -75,9 +75,14 @@ pub(crate) struct Ctx {
     pub restored: Vec<(PathBuf, PathBuf)>,
     /// Something existing was overwritten or merged into: no inverse can bring it back.
     pub tainted: bool,
+    /// Fifos, sockets and device nodes a copy passed over.
+    pub skipped: u64,
     pub reflink: bool,
     #[cfg(test)]
     pub cancel_after_bytes: Option<u64>,
+    /// Makes every move's `rename(2)` fail with EXDEV, the cross-device path on one file system.
+    #[cfg(test)]
+    pub force_exdev: bool,
 }
 
 impl Ctx {
@@ -106,9 +111,12 @@ impl Ctx {
             trashed: Vec::new(),
             restored: Vec::new(),
             tainted: false,
+            skipped: 0,
             reflink: true,
             #[cfg(test)]
             cancel_after_bytes: None,
+            #[cfg(test)]
+            force_exdev: false,
         }
     }
 

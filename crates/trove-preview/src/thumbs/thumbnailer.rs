@@ -196,6 +196,15 @@ impl<'a> Script<'a> {
     }
 
     fn reference(&mut self, out: &mut String, value: String) {
+        // A backslash right before the code would escape the reference's own first quote. Read it
+        // as the shell would have read it before a file name: dropped when bare, literal in quotes.
+        if std::mem::take(&mut self.escaped) {
+            if self.state == Quoting::Bare {
+                out.pop();
+            } else {
+                out.push('\\');
+            }
+        }
         let name = format!("TROVE_ARG_{}", self.env.len() + 1);
         let quote = match self.state {
             Quoting::Bare => "",
@@ -384,6 +393,13 @@ mod tests {
             assert!(c.env.is_empty(), "{exec}");
             assert!(c.argv.contains(&"/i'x".to_owned()), "{exec}");
         }
+    }
+
+    #[test]
+    fn a_backslash_before_a_code_leaves_the_reference_whole() {
+        let t = Thumbnailer { try_exec: None, exec: r#"sh -c "cp \\%i '%o'""#.into(), mime_types: Vec::new() };
+        let cmd = t.command_line(Path::new("/i"), "u", Path::new("/o"), 8);
+        assert_eq!(cmd.argv[2], r#"cp "$TROVE_ARG_1" ''"$TROVE_ARG_2"''"#);
     }
 
     #[test]

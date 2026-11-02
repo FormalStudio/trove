@@ -203,7 +203,7 @@ impl Level {
 }
 
 fn id_of(name: &std::ffi::OsStr) -> EntryId {
-    EntryId::of(&name.to_string_lossy())
+    EntryId::of(name)
 }
 
 /// Where the columns start for `dir`: Home when it is inside Home, else the root.

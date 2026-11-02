@@ -1,6 +1,7 @@
 //! The Trash view's extra columns: where each trashed item came from and when it was deleted,
 //! read from the `.trashinfo` file beside `files/` on a worker thread.
 
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
 /// One item's `.trashinfo`.
@@ -25,7 +26,7 @@ pub fn is_trash_files(dir: &Path, home_trash: &Path) -> bool {
 }
 
 /// Reads the info of each name in `files`, a trash's `files` folder.
-pub fn read_infos(files: &Path, names: &[String]) -> Vec<(String, TrashInfo)> {
+pub fn read_infos(files: &Path, names: &[OsString]) -> Vec<(OsString, TrashInfo)> {
     let Some(trash) = files.parent() else { return Vec::new() };
     let info_dir = trash.join("info");
     // A volume trash records paths relative to the volume's top folder.
@@ -33,7 +34,9 @@ pub fn read_infos(files: &Path, names: &[String]) -> Vec<(String, TrashInfo)> {
     names
         .iter()
         .map(|name| {
-            let text = std::fs::read_to_string(info_dir.join(format!("{name}.trashinfo"))).unwrap_or_default();
+            let mut info = name.clone();
+            info.push(".trashinfo");
+            let text = std::fs::read_to_string(info_dir.join(info)).unwrap_or_default();
             (name.clone(), parse(&text, top.as_deref()))
         })
         .collect()
