@@ -1,0 +1,37 @@
+#!/usr/bin/env bash
+# Regenerates the README and website screenshots: docs/shots/<os>.png, dark, 1920x1080, the list
+# view with the preview pane open on the demo fixture (TROVE_DEMO=1).
+#
+#   scripts/shots linux|all
+#
+# linux runs tests/real_shots.rs: a release build inside nd's private headless Hyprland, never
+# the session you are in. It writes docs/shots/linux.png (dark) and linux-light.png. macos and
+# windows are not captured yet; `all` skips them and says so.
+set -euo pipefail
+
+root=$(cd "$(dirname "$0")/.." && pwd)
+shots="$root/docs/shots"
+mkdir -p "$shots"
+
+linux() {
+  [ "$(uname)" = Linux ] || { echo "scripts/shots linux needs a Linux host (g815)" >&2; exit 1; }
+  cd "$root"
+  fspec dev -- cargo build --release
+  env -u HYPRLAND_INSTANCE_SIGNATURE ND_REAL=1 TROVE_BIN="$root/target/release/trove" \
+    fspec dev -- cargo test --release --test real_shots -- --nocapture
+  cp "$root/artifacts/shots/readme-dark.png" "$shots/linux.png"
+  cp "$root/artifacts/shots/readme-light.png" "$shots/linux-light.png"
+  echo "$shots/linux.png"
+}
+
+case "${1:-}" in
+  linux) linux ;;
+  all)
+    linux
+    echo "macos and windows shots are not captured yet" >&2
+    ;;
+  *)
+    sed -n '2,9p' "$0"
+    exit 2
+    ;;
+esac

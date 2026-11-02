@@ -1,0 +1,46 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <defs>
+    <linearGradient id="tile" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#FFB547"/>
+      <stop offset="1" stop-color="#E4570F"/>
+    </linearGradient>
+    <linearGradient id="gloss" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#fff" stop-opacity="0.38"/>
+      <stop offset="1" stop-color="#fff" stop-opacity="0"/>
+    </linearGradient>
+    <linearGradient id="front" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#FFFFFF"/>
+      <stop offset="1" stop-color="#FFE9CF"/>
+    </linearGradient>
+    <linearGradient id="back" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#FFE3B8"/>
+      <stop offset="1" stop-color="#FFD39A"/>
+    </linearGradient>
+    <filter id="drop" x="-10%" y="-10%" width="120%" height="125%">
+      <feDropShadow dx="0" dy="18" stdDeviation="22" flood-color="#5a1c00" flood-opacity="0.38"/>
+    </filter>
+    <filter id="soft" x="-10%" y="-10%" width="120%" height="130%">
+      <feDropShadow dx="0" dy="10" stdDeviation="12" flood-color="#7a2a00" flood-opacity="0.35"/>
+    </filter>
+    <clipPath id="tileclip"><rect x="100" y="100" width="824" height="824" rx="188"/></clipPath>
+  </defs>
+  <rect x="100" y="100" width="824" height="824" rx="188" fill="url(#tile)" filter="url(#drop)"/>
+  <g clip-path="url(#tileclip)">
+    <rect x="100" y="100" width="824" height="412" fill="url(#gloss)"/>
+  </g>
+  <rect x="101.5" y="101.5" width="821" height="821" rx="186.5" fill="none" stroke="#fff" stroke-opacity="0.28" stroke-width="3"/>
+  <g filter="url(#soft)">
+    <path d="M222 322H452Q482 322 502 346L530 384H792Q824 384 824 416V744Q824 776 792 776H232Q200 776 200 744V344Q200 322 222 322Z" fill="url(#back)"/>
+  </g>
+  <g transform="translate(512 460) scale(1.18) translate(-512 -460)">
+    <polygon points="440,262 584,262 548,356 476,356" fill="#D8FFF7"/>
+    <polygon points="440,262 476,356 352,356" fill="#6FF0DB"/>
+    <polygon points="584,262 672,356 548,356" fill="#34D6C0"/>
+    <polygon points="352,356 476,356 512,548" fill="#17B8A5"/>
+    <polygon points="476,356 548,356 512,548" fill="#8FF5E5"/>
+    <polygon points="548,356 672,356 512,548" fill="#0C8F82"/>
+  </g>
+  <g filter="url(#soft)">
+    <rect x="200" y="460" width="624" height="316" rx="40" fill="url(#front)"/>
+  </g>
+</svg>

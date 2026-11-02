@@ -1,4 +1,6 @@
 use std::cmp::Ordering;
+use std::collections::{HashMap, HashSet};
+use std::hash::{BuildHasherDefault, Hasher};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::SystemTime;
@@ -19,6 +21,34 @@ impl EntryId {
         Self(h)
     }
 }
+
+/// Hashes an [`EntryId`], which is already a hash of the name, with one mixing step instead of
+/// SipHash: a 100k-entry folder rebuilds its maps on every sort and filter.
+#[derive(Clone, Copy, Default)]
+pub struct IdHasher(u64);
+
+impl Hasher for IdHasher {
+    fn finish(&self) -> u64 {
+        // splitmix64's finaliser, so the low bits a table indexes by depend on every bit.
+        let mut x = self.0;
+        x = (x ^ (x >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+        x = (x ^ (x >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+        x ^ (x >> 31)
+    }
+
+    fn write(&mut self, bytes: &[u8]) {
+        for b in bytes {
+            self.0 = (self.0 ^ u64::from(*b)).wrapping_mul(0x0100_0000_01b3);
+        }
+    }
+
+    fn write_u64(&mut self, n: u64) {
+        self.0 ^= n;
+    }
+}
+
+pub type IdMap<V> = HashMap<EntryId, V, BuildHasherDefault<IdHasher>>;
+pub type IdSet = HashSet<EntryId, BuildHasherDefault<IdHasher>>;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum EntryKind {
@@ -64,6 +94,9 @@ pub struct Entry {
     pub file_kind: FileKind,
     pub hidden: bool,
     pub meta: Option<Meta>,
+    /// [`natural_key`] of the name, made with the entry (on the listing's thread), so a sort
+    /// compares bytes.
+    pub sort_key: Box<[u8]>,
 }
 
 impl Entry {
@@ -75,6 +108,7 @@ impl Entry {
             file_kind: if kind.is_dir() { FileKind::Folder } else { FileKind::from_name(name) },
             hidden: name.starts_with('.') || name.ends_with('~'),
             meta: None,
+            sort_key: natural_key(name),
         }
     }
 
@@ -217,6 +251,37 @@ pub fn natural_cmp(a: &str, b: &str) -> Ordering {
     }
 }
 
+/// Bytes that compare as [`natural_cmp`] compares the names. A run of digits becomes `0`, its
+/// length without leading zeros, those digits and its full length; any other character its
+/// folded UTF-8. `0` orders against every non-digit as the digit it stands for would, and no
+/// non-digit encodes to it, so two keys stay aligned run by run. A length takes one byte: a
+/// file name holds at most 255.
+pub fn natural_key(name: &str) -> Box<[u8]> {
+    let bytes = name.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len() + 4);
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i].is_ascii_digit() {
+            let start = i;
+            while i < bytes.len() && bytes[i].is_ascii_digit() {
+                i += 1;
+            }
+            let run = &bytes[start..i];
+            let n = trim_zeros(run);
+            out.push(b'0');
+            out.push(u8::try_from(n.len()).unwrap_or(u8::MAX));
+            out.extend_from_slice(n);
+            out.push(u8::try_from(run.len()).unwrap_or(u8::MAX));
+        } else {
+            let c = name[i..].chars().next().unwrap_or('\u{fffd}');
+            let mut buf = [0; 4];
+            out.extend_from_slice(fold(c).encode_utf8(&mut buf).as_bytes());
+            i += c.len_utf8();
+        }
+    }
+    out.into_boxed_slice()
+}
+
 fn trim_zeros(d: &[u8]) -> &[u8] {
     let n = d.iter().take_while(|c| **c == b'0').count();
     &d[n.min(d.len().saturating_sub(1))..]
@@ -280,7 +345,7 @@ pub fn sort_entries(entries: &mut [Entry], order: SortOrder) {
             SortKey::Modified => meta_time(a, |m| m.modified).cmp(&meta_time(b, |m| m.modified)),
             SortKey::Created => meta_time(a, |m| m.created).cmp(&meta_time(b, |m| m.created)),
         };
-        let ord = by_key.then_with(|| natural_cmp(&a.name, &b.name)).then_with(|| a.name.cmp(&b.name));
+        let ord = by_key.then_with(|| a.sort_key.cmp(&b.sort_key)).then_with(|| a.name.cmp(&b.name));
         if order.ascending { ord } else { ord.reverse() }
     });
 }
@@ -296,6 +361,29 @@ fn meta_time(e: &Entry, f: impl Fn(&Meta) -> Option<SystemTime>) -> Option<Syste
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn natural_key_orders_as_natural_cmp() {
+        let parts =
+            ["a", "B", "b", "0", "00", "1", "01", "2", "10", "007", "99", "x", "Z", " ", ".", "-", "é", "É", "ß", "_"];
+        let mut names = Vec::new();
+        let mut seed: u64 = 0x2545_f491_4f6c_dd1d;
+        for _ in 0..4000 {
+            let mut name = String::new();
+            for _ in 0..(seed % 5 + 1) {
+                seed ^= seed << 13;
+                seed ^= seed >> 7;
+                seed ^= seed << 17;
+                name.push_str(parts[(seed % parts.len() as u64) as usize]);
+            }
+            names.push(name);
+        }
+        for a in &names[..400] {
+            for b in &names {
+                assert_eq!(natural_key(a).cmp(&natural_key(b)), natural_cmp(a, b), "{a:?} vs {b:?}");
+            }
+        }
+    }
 
     #[test]
     fn natural_order() {

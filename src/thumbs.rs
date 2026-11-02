@@ -16,9 +16,11 @@ use trove_preview::{Config, Engine, ThumbSize, Thumbnails};
 use crate::pump::pump;
 use crate::tab::Tab;
 
-/// Two workers: thumbnails are disk and decode bound, and a low-end laptop has four cores
-/// that the listing's stat pool also wants.
-const THREADS: usize = 2;
+/// Half the cores, two to four: decoding is CPU bound, and the listing's stat pool and the
+/// window want the rest.
+fn threads() -> usize {
+    std::thread::available_parallelism().map_or(2, |n| (n.get() / 2).clamp(2, 4))
+}
 /// Arrivals kept for tabs that have not caught up yet.
 const RECENT: usize = 4096;
 
@@ -80,7 +82,7 @@ pub fn get(cx: &mut App) -> Entity<Thumbs> {
         return shared.0.clone();
     }
     let entity = cx.new(|cx| {
-        let (pool, rx) = Thumbnails::with_engine(engine(), THREADS);
+        let (pool, rx) = Thumbnails::with_engine(engine(), threads());
         pump(rx.clone(), cx.weak_entity(), |t: &mut Thumbs, batch, cx| {
             t.arrive(batch, cx);
             true
@@ -142,6 +144,9 @@ impl Thumbs {
             self.arrivals.push_back((self.seq, path.clone()));
             self.done.insert(path, thumb);
         }
+        if self.asked.is_empty() {
+            crate::trace::mark("thumbnails idle");
+        }
         while self.arrivals.len() > RECENT {
             self.arrivals.pop_front();
         }
@@ -172,7 +177,7 @@ impl Thumbs {
 }
 
 /// The picture of a grid tile: the thumbnail once it exists, the kind's icon until then.
-pub fn tile_art(path: Option<PathBuf>, e: &Entry, cx: &mut Context<Tab>) -> AnyElement {
+pub fn tile_art(path: Option<PathBuf>, e: &Entry, lit: bool, cx: &mut Context<Tab>) -> AnyElement {
     let mtime = e.meta.as_ref().and_then(|m| m.modified);
     let thumb = path.and_then(|p| {
         let network = crate::settings::get(cx).network_thumbnails;
@@ -192,7 +197,12 @@ pub fn tile_art(path: Option<PathBuf>, e: &Entry, cx: &mut Context<Tab>) -> AnyE
             .text_color(crate::icons::tint(e.file_kind, theme))
             .into_any_element(),
     };
-    div().flex_1().w_full().flex().items_center().justify_center().child(art).into_any_element()
+    let plate = div()
+        .p(theme.spacing.xs)
+        .rounded(theme.radius.md)
+        .when(lit, |d| d.bg(theme.pressed(theme.surface.base)))
+        .child(art);
+    div().flex_1().w_full().flex().items_center().justify_center().child(plate).into_any_element()
 }
 
 /// The box a tile's picture takes inside the tile.

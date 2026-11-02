@@ -6,15 +6,18 @@ search that finds a file anywhere in the home directory before the user finishes
 
 ## Budgets (release build, on e1504g: i3-N305, iGPU, 60 Hz)
 
-| Measure | Budget |
-| --- | --- |
-| Launch to first frame with the window's chrome | under 200 ms, whatever is mounted |
-| First names of a 10k-entry local folder on screen | under 50 ms after navigation |
-| A folder on a dead NFS/SMB mount | the window stays responsive; "Waiting for server" after 1 s |
-| Search across an indexed home of 500k files, per keystroke | under 30 ms to ranked results |
-| Idle CPU, window open, nothing changing | 0% |
-| Scrolling a 100k-entry folder | no missed frames at 60 Hz |
-| Resident memory with a 100k-entry folder open | under 150 MB |
+| Measure | Budget | Measured |
+| --- | --- | --- |
+| Launch to first frame with the window's chrome | under 200 ms, whatever is mounted | 178 ms (175 to 190), 0 syscalls on the sshfs mount |
+| First names of a 10k-entry local folder on screen | under 50 ms after navigation | 10 ms for 100k entries, all listed in 61 to 98 ms |
+| A folder on a dead NFS/SMB mount | the window stays responsive; "Waiting for server" after 1 s | shown at 1064 ms, the window answering in 1 ms |
+| Search across an indexed home of 500k files, per keystroke | under 30 ms to ranked results | 0.4 to 2.4 ms median per word (343k entries) |
+| Idle CPU, window open, nothing changing | 0% | 0 ticks in 10 s; 2 to 3 ticks in 20 s with a shell `theme.json` present (nd's theme watcher) |
+| Scrolling a 100k-entry folder | no missed frames at 60 Hz | p95 16.8 ms, 1 missed frame in 718 (the listing's last batch) |
+| Resident memory with a 100k-entry folder open | under 150 MB | 145 MB |
+
+Measured on g815 pinned to its E-cores (`taskset -c 8-15`), on its Intel GPU alone, with
+`tests/real_perf.rs` (`ND_REAL=1`, ignored by default).
 
 Nothing that can block runs on the main thread: no stat, no readdir, no statvfs, no thumbnail
 decode, no index load. Startup reads only small procfs and config files (`/proc/self/mountinfo`,

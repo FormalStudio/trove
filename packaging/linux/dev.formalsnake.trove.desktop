@@ -1,0 +1,17 @@
+[Desktop Entry]
+Type=Application
+Name=Trove
+GenericName=Files
+Comment=Browse, search and preview files
+Exec=trove %U
+Icon=dev.formalsnake.trove
+Terminal=false
+Categories=System;FileTools;FileManager;Utility;
+MimeType=inode/directory;
+Keywords=files;folders;explorer;finder;browse;manager;directory;
+StartupWMClass=dev.formalsnake.trove
+Actions=new-window;
+
+[Desktop Action new-window]
+Name=New Window
+Exec=trove

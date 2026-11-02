@@ -142,14 +142,51 @@ fn demo_start(start: Start) -> Start {
     }
 }
 
+/// A launcher passes `%U` as `file://` URIs; a shell passes plain paths.
+fn arg_path(arg: std::ffi::OsString) -> PathBuf {
+    use std::os::unix::ffi::{OsStrExt, OsStringExt};
+    let Some(rest) = arg.as_bytes().strip_prefix(b"file://") else { return PathBuf::from(arg) };
+    let rest = rest.strip_prefix(b"localhost").unwrap_or(rest);
+    let hex = |b: u8| (b as char).to_digit(16).map(|d| d as u8);
+    let mut out = Vec::with_capacity(rest.len());
+    let mut i = 0;
+    while i < rest.len() {
+        match (rest[i], rest.get(i + 1).copied().and_then(hex), rest.get(i + 2).copied().and_then(hex)) {
+            (b'%', Some(hi), Some(lo)) => {
+                out.push(hi << 4 | lo);
+                i += 3;
+            }
+            (b, ..) => {
+                out.push(b);
+                i += 1;
+            }
+        }
+    }
+    PathBuf::from(std::ffi::OsString::from_vec(out))
+}
+
 pub fn run() -> nd::Result<()> {
     trace::init();
     pump::set_live();
     let start = match std::env::args_os().nth(1) {
-        Some(arg) => Start::Path(std::path::absolute(PathBuf::from(arg)).unwrap_or_default()),
+        Some(arg) => Start::Path(std::path::absolute(arg_path(arg)).unwrap_or_default()),
         None => Start::Home,
     };
     app().run(move |cx| {
         open(cx, start.clone());
     })
+}
+
+#[cfg(test)]
+mod arg_tests {
+    use super::arg_path;
+    use std::path::PathBuf;
+
+    #[test]
+    fn file_uris_decode_and_paths_pass_through() {
+        assert_eq!(arg_path("file:///home/a%20b/%C3%A9".into()), PathBuf::from("/home/a b/é"));
+        assert_eq!(arg_path("file://localhost/tmp/x".into()), PathBuf::from("/tmp/x"));
+        assert_eq!(arg_path("/tmp/100%".into()), PathBuf::from("/tmp/100%"));
+        assert_eq!(arg_path("file:///tmp/100%".into()), PathBuf::from("/tmp/100%"));
+    }
 }

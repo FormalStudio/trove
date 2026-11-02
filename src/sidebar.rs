@@ -269,11 +269,14 @@ impl Sidebar {
                     node = node.caption(why.clone());
                 } else if let Some(u) = self.usage.get(&v.mount_point).filter(|u| u.total > 0) {
                     // nd: source rows share one fixed pitch, so a caption over a meter runs
-                    // into the next row; the free space sits beside the name instead.
+                    // into the next row; the free space sits beside the name instead. The
+                    // meter spans what the badge and the actions leave, so every device row
+                    // gets a badge of the same width (figure spaces pad it) and no inline
+                    // action; a disk ejects from its context menu.
                     let used = u.total.saturating_sub(u.free) as f64 / u.total as f64;
-                    node = node.badge(format!("{} free", format::size(u.free))).meter(used as f32);
+                    node = node.badge(format!("{:\u{2007}>6} free", format::size(u.free))).meter(used as f32);
                 }
-                if ejectable(v.kind) {
+                if ejectable(v.kind) && !wanted {
                     node = node.actions([EJECT]);
                 }
                 nodes.push(node);

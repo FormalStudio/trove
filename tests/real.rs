@@ -65,6 +65,10 @@ fn real_light_and_dark_list_and_grid() {
         expect(&app.get_by_test_id("files-grid")).to_be_visible().unwrap();
         std::thread::sleep(Duration::from_millis(800));
         grab(&compositor, app.pid(), &dir.join(format!("grid-{scheme}.png")));
+
+        app.keyboard().press("home right").unwrap();
+        std::thread::sleep(Duration::from_millis(400));
+        grab(&compositor, app.pid(), &dir.join(format!("grid-selected-{scheme}.png")));
     }
 }
 

@@ -298,6 +298,8 @@ fn the_grid_and_columns_select_through_their_own_lists() {
 fn search_filters_by_name_and_escape_clears() {
     let mut h = Harness::new();
     let window = h.window.id();
+    assert!(nd::test::by_test_id(&mut h.cx, window, "search").is_none(), "search starts closed");
+    h.act(FocusSearch);
     let field = nd::test::by_test_id(&mut h.cx, window, "search").expect("a search field");
     h.cx.emit(field.id, nd::components::TextChanged { text: "do".into() });
     h.settle();
@@ -307,7 +309,10 @@ fn search_filters_by_name_and_escape_clears() {
 
     h.act(ClearSearch);
     assert_eq!(h.names(), ROOT_NAMES);
+    assert!(nd::test::by_test_id(&mut h.cx, window, "search").is_none(), "escape closes search");
 
+    h.act(FocusSearch);
+    let field = nd::test::by_test_id(&mut h.cx, window, "search").expect("a search field");
     h.cx.emit(field.id, nd::components::TextChanged { text: "zzz".into() });
     h.settle();
     assert!(h.names().is_empty());

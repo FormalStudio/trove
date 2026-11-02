@@ -83,11 +83,19 @@ pub fn volumes() -> Vec<Volume> {
     build_volumes(&mounts, &labels, unsafe { libc::getuid() })
 }
 
-pub(crate) fn path_is_network(path: &Path) -> bool {
+/// Whether `dir` is on a network file system, and the names in it that are network mount
+/// points: a stat of one goes to its server, which can take as long as the server likes.
+pub(crate) fn network_here(dir: &Path) -> (bool, HashSet<String>) {
     let text = std::fs::read_to_string(MOUNTINFO).unwrap_or_default();
     // SAFETY: getuid has no preconditions.
     let vols = build_volumes(&parse_mountinfo(&text), &HashMap::new(), unsafe { libc::getuid() });
-    is_network_path(path, &vols)
+    let mounts = vols
+        .iter()
+        .filter(|v| matches!(v.kind, VolumeKind::Network | VolumeKind::Phone | VolumeKind::Gvfs))
+        .filter(|v| v.mount_point.parent() == Some(dir))
+        .filter_map(|v| Some(v.mount_point.file_name()?.to_string_lossy().into_owned()))
+        .collect();
+    (is_network_path(dir, &vols), mounts)
 }
 
 pub fn is_network_path(path: &Path, vols: &[Volume]) -> bool {

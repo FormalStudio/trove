@@ -57,6 +57,9 @@ pub struct Root {
     quicklook: Entity<crate::quicklook::QuickLook>,
     show_preview: bool,
     show_hidden: bool,
+    /// The search bar under the tabs is open: Ctrl+F or the toolbar's toggle opened it, and Esc
+    /// or the toggle closes it. A tab with a filter typed keeps it open too.
+    searching: bool,
     chrome: Option<Chrome>,
     titles: Vec<String>,
     size: (f32, f32),
@@ -102,6 +105,7 @@ impl Root {
             quicklook: cx.new(crate::quicklook::QuickLook::new),
             show_preview: false,
             show_hidden: prefs.show_hidden,
+            searching: false,
             chrome: None,
             titles: Vec::new(),
             size: (0., 0.),
@@ -522,11 +526,39 @@ impl Root {
         self.tabs.iter().position(|(n, _)| format!("tab-{n}") == id)
     }
 
+    fn search_shown(&self, cx: &App) -> bool {
+        self.searching || !self.active_tab().read(cx).query().is_empty()
+    }
+
+    /// The search bar: under the tab strip, right over the listing it filters.
+    fn search_bar(&self, cx: &mut Context<Self>) -> Option<impl IntoElement + use<>> {
+        if !self.search_shown(cx) {
+            return None;
+        }
+        let title = self.chrome.as_ref().map(|c| c.title.clone()).unwrap_or_default();
+        let search = self.active_tab().read(cx).search().clone();
+        let theme = cx.theme();
+        Some(
+            h_flex()
+                .id("search-bar")
+                .w_full()
+                .justify_center()
+                .p(theme.spacing.sm)
+                .border_b_1()
+                .border_color(theme.border.subtle)
+                .child(
+                    search_field("search", &search)
+                        .placeholder(format!("Search {title}"))
+                        .key_context(SEARCH)
+                        .w(px(360.)),
+                ),
+        )
+    }
+
     fn toolbar(&self, cx: &mut Context<Self>) -> Toolbar {
         let chrome = self.chrome.clone();
         let (can_back, can_forward) = chrome.as_ref().map_or((false, false), |c| (c.can_back, c.can_forward));
-        let title = chrome.map(|c| c.title).unwrap_or_default();
-        let search = self.active_tab().read(cx).search().clone();
+        let searching = self.search_shown(cx);
         toolbar()
             .hide_title()
             .navigation(icon_button("back", Icon::ChevronLeft).tooltip("Back").disabled(!can_back).dispatch(Back))
@@ -536,9 +568,10 @@ impl Root {
             .item(self.pathbar.clone())
             .flexible_space()
             .item(self.view_switch())
-            .item(
-                search_field("search", &search).placeholder(format!("Search {title}")).key_context(SEARCH).w(px(220.)),
-            )
+            .item({
+                let toggle = icon_button("search-toggle", Icon::Search).tooltip("Search").checked(searching);
+                if searching { toggle.dispatch(ClearSearch) } else { toggle.dispatch(FocusSearch) }
+            })
             .item(
                 icon_button("preview-toggle", Icon::PanelRight)
                     .tooltip("Preview")
@@ -592,11 +625,17 @@ impl Root {
             .on_action(
                 cx.listener(|this, _: &CompletePath, _, cx| this.pathbar.clone().update(cx, |p, cx| p.complete(cx))),
             )
-            .on_action(cx.listener(|_, _: &FocusSearch, window, _| window.focus("search")))
+            .on_action(cx.listener(|this, _: &FocusSearch, window, cx| {
+                this.searching = true;
+                cx.notify();
+                window.focus("search");
+            }))
             .on_action(cx.listener(|this, _: &ClearSearch, window, cx| {
                 this.with_tab(cx, |t, cx| {
                     t.clear_search(window, cx);
                 });
+                this.searching = false;
+                cx.notify();
                 this.focus_files(window, cx);
             }))
             .on_action(cx.listener(|this, _: &NewTab, window, cx| {
@@ -671,6 +710,7 @@ impl Render for Root {
             .size_full()
             .on_navigate(|e: &NavigateEvent, window, cx| history(e, window, cx))
             .children(tabs)
+            .children(self.search_bar(cx))
             .child(div().flex_1().min_h_0().child(self.active_tab().clone()))
             .child(self.status.clone())
             .child(self.quicklook.clone());

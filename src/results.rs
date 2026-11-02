@@ -436,6 +436,7 @@ fn start(tab: &mut Tab, query: String, cx: &mut Context<Tab>) {
                 let m = substring_matches(&e.name, &query)?;
                 Some((e.path_in(dir.as_deref()?), e.is_dir(), m))
             })
+            .take(LIMIT)
             .collect()
     };
     let show_hidden = tab.show_hidden();

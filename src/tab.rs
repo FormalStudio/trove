@@ -11,7 +11,8 @@ use nd::core::WindowId;
 use nd::prelude::*;
 use nd::virtual_list::{List, RowDropped, SelectionChanged};
 use trove_fs::{
-    Change, Entry, EntryId, EntryKind, ListError, ListEvent, ListOptions, Listing, Meta, SortKey, SortOrder, Usage,
+    Change, Entry, EntryId, EntryKind, IdMap, IdSet, ListError, ListEvent, ListOptions, Listing, Meta, SortKey,
+    SortOrder, Usage,
 };
 
 use crate::actions::{DRAG_FILES, DropOnto, FILES, OpenPlaceInNewTab, RENAMING};
@@ -82,8 +83,8 @@ pub struct Tab {
     back: Vec<Location>,
     forward: Vec<Location>,
     entries: Vec<Entry>,
-    index: HashMap<EntryId, usize>,
-    versions: HashMap<EntryId, u64>,
+    index: IdMap<usize>,
+    versions: IdMap<u64>,
     /// Full paths of Recent's entries, which share no folder.
     paths: HashMap<EntryId, PathBuf>,
     visible: Vec<EntryId>,
@@ -113,7 +114,10 @@ pub struct Tab {
     reveal: Option<EntryId>,
     width: f32,
     /// The shown folders, which take drops on their rows.
-    folders: Rc<HashSet<EntryId>>,
+    folders: Rc<IdSet>,
+    /// The tiles last drawn selected. The grid redraws a tile only when its version moves, and
+    /// a tile draws its own selection, so a change of selection bumps the tiles it touches.
+    lit: IdSet,
     /// The location came off the command line and may name a file: on `NotADirectory` the
     /// tab opens its folder with it selected instead of failing.
     maybe_file: bool,
@@ -129,6 +133,10 @@ pub struct Tab {
     trash_asked: HashSet<EntryId>,
     /// An element to focus on the next frame, for state changes that arrive without a window.
     focus_next: Option<&'static str>,
+    /// The generation whose first names `TROVE_TRACE` reported.
+    names_traced: u64,
+    /// The rows the view's list was last given.
+    synced: (View, Vec<(EntryId, u64)>),
     _clip: Subscription,
     pub(crate) extras: crate::extras::TabExtras,
 }
@@ -141,9 +149,11 @@ impl Tab {
         cx.observe(&search, |this: &mut Tab, search, cx| {
             if search.read(cx).last_event() == Some(TextEvent::Edited) {
                 this.query = search.read(cx).text().clone();
-                crate::results::before_refresh(this, cx);
-                this.refresh(cx);
-                crate::results::after_refresh(this, cx);
+                crate::trace::timed("filter", || {
+                    crate::results::before_refresh(this, cx);
+                    this.refresh(cx);
+                    crate::results::after_refresh(this, cx);
+                });
             }
         })
         .detach();
@@ -156,8 +166,9 @@ impl Tab {
             back: Vec::new(),
             forward: Vec::new(),
             entries: Vec::new(),
-            index: HashMap::new(),
-            versions: HashMap::new(),
+            index: IdMap::default(),
+            versions: IdMap::default(),
+            lit: IdSet::default(),
             paths: HashMap::new(),
             visible: Vec::new(),
             table,
@@ -194,6 +205,8 @@ impl Tab {
             trash_info: HashMap::new(),
             trash_asked: HashSet::new(),
             focus_next: None,
+            names_traced: 0,
+            synced: (view, Vec::new()),
             _clip: watch_clip,
             extras: crate::extras::TabExtras::new(cx),
         };
@@ -384,18 +397,20 @@ impl Tab {
         self.free = None;
         self.today = Today::now();
         crate::thumbs::cancel(cx);
+        self.synced.1.clear();
         for state in [&mut self.table, &mut self.grid] {
             state.set_items(Vec::new(), cx);
             state.scroll_to_top(cx);
         }
         let generation = self.generation;
+        crate::trace::mark("load");
         let me = cx.weak_entity();
         match &location {
             Location::Dir(dir) => {
                 let listing = trove_fs::list(dir.clone(), ListOptions { show_hidden: self.show_hidden });
                 self.events = Some(listing.events.clone());
                 pump(listing.events.clone(), me.clone(), move |tab: &mut Tab, batch, cx| {
-                    tab.generation == generation && tab.apply(batch, cx)
+                    tab.generation == generation && crate::trace::timed("apply", || tab.apply(batch, cx))
                 });
                 self.listing = Some(listing);
                 let usage = crate::env::usage(dir.clone(), Duration::from_secs(2));
@@ -491,6 +506,7 @@ impl Tab {
                     }
                 }
                 ListEvent::Complete => {
+                    crate::trace::mark("complete");
                     if !matches!(self.load, Load::Failed(_)) {
                         self.load = Load::Complete;
                     }
@@ -604,27 +620,24 @@ impl Tab {
     /// Recomputes what shows from the sorted entries, the hidden toggle and the filter, and
     /// hands the keys to the view in use. Only rows whose version moved render again.
     fn refresh(&mut self, cx: &mut Context<Self>) {
-        let query = self.query.trim().to_owned();
-        let smart_case = query.chars().any(char::is_uppercase);
-        let needle = if smart_case { query.clone() } else { query.to_lowercase() };
-        let show_hidden = self.show_hidden;
-        self.visible = self
-            .entries
-            .iter()
-            .filter(|e| show_hidden || !e.hidden)
-            .filter(|e| {
-                needle.is_empty()
-                    || if smart_case { e.name.contains(&needle) } else { e.name.to_lowercase().contains(&needle) }
-            })
-            .map(|e| e.id)
-            .collect();
-        let folders = if self.in_trash {
-            HashSet::new()
-        } else {
-            self.visible.iter().copied().filter(|id| self.listed_folder(id)).collect()
-        };
+        let filter = Filter::new(self.query.trim());
+        let (show_hidden, in_trash) = (self.show_hidden, self.in_trash);
+        let mut folders = IdSet::default();
+        self.visible.clear();
+        for e in &self.entries {
+            if (show_hidden || !e.hidden) && filter.matches(&e.name) {
+                self.visible.push(e.id);
+                if !in_trash && listed_folder(e) {
+                    folders.insert(e.id);
+                }
+            }
+        }
         self.folders = Rc::new(folders);
-        self.sync_view(cx);
+        // Search results cover the listing; its list catches up when they go, which spares a
+        // keystroke handing a 100k-row list over that nobody sees.
+        if !self.extras.results.shown() {
+            self.sync_view(cx);
+        }
         self.apply_reveal(cx);
         self.apply_pending(cx);
         cx.notify();
@@ -633,7 +646,13 @@ impl Tab {
     fn sync_view(&mut self, cx: &mut Context<Self>) {
         let rows: Vec<(EntryId, u64)> =
             self.visible.iter().map(|id| (*id, self.versions.get(id).copied().unwrap_or(0))).collect();
-        self.list_state_mut().set_items_versioned(rows, cx);
+        // The list hashes every row it is handed, which on 100k rows is longer than a frame,
+        // so the same rows at the same versions are not handed over again.
+        if self.view != View::Columns && self.synced.0 == self.view && self.synced.1 == rows {
+            return;
+        }
+        self.list_state_mut().set_items_versioned(rows.iter().copied(), cx);
+        self.synced = (self.view, rows);
     }
 
     fn apply_reveal(&mut self, cx: &mut Context<Self>) {
@@ -692,8 +711,10 @@ impl Tab {
         } else {
             self.sort = sort;
         }
-        self.resort();
-        self.refresh(cx);
+        crate::trace::timed("sort", || {
+            self.resort();
+            self.refresh(cx);
+        });
     }
 
     fn on_sort(&mut self, e: &SortChanged, cx: &mut Context<Self>) {
@@ -821,7 +842,7 @@ impl Tab {
 
     /// Whether `id` names a folder of the listing, results or not.
     fn listed_folder(&self, id: &EntryId) -> bool {
-        self.entry(id).is_some_and(|e| e.is_dir() || matches!(e.kind, EntryKind::Symlink { .. }) && e.meta.is_none())
+        self.entry(id).is_some_and(listed_folder)
     }
 
     /// Tiles to a row: what Up and Down step by.
@@ -1024,11 +1045,25 @@ impl Tab {
         }
     }
 
+    fn light_tiles(&mut self, cx: &mut Context<Self>) {
+        let now: IdSet = self.grid.selected().into_iter().collect();
+        if now == self.lit {
+            return;
+        }
+        let moved: Vec<EntryId> = now.symmetric_difference(&self.lit).copied().collect();
+        for id in moved {
+            self.bump(id);
+        }
+        self.lit = now;
+        self.sync_view(cx);
+    }
+
     fn tile(&mut self, id: EntryId, _window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let field = self.renaming.as_ref().filter(|r| r.id == id).map(|r| self.rename_field(r, true, cx));
         let path = self.path_of(&id);
         let Some(e) = self.entry(&id) else { return div().into_any_element() };
-        let art = crate::thumbs::tile_art(path, e, cx);
+        let lit = self.lit.contains(&id);
+        let art = crate::thumbs::tile_art(path, e, lit, cx);
         let theme = cx.theme();
         let label = match field {
             Some(field) => field,
@@ -1037,22 +1072,35 @@ impl Tab {
                 .flex()
                 .justify_center()
                 .child(
-                    text(e.name.to_string())
-                        .text_size(theme.type_scale.footnote)
-                        .text_center()
-                        .line_clamp(2)
-                        .when(e.hidden, |t| t.text_color(theme.text.secondary)),
+                    div()
+                        .max_w_full()
+                        .px(theme.spacing.xs)
+                        .rounded(theme.radius.sm)
+                        .when(lit, |d| d.bg(theme.accent_fill))
+                        .child(
+                            text(e.name.to_string())
+                                .text_size(theme.type_scale.footnote)
+                                .text_center()
+                                .line_clamp(2)
+                                .when(lit, |t| t.text_color(theme.text.on_accent))
+                                .when(e.hidden && !lit, |t| t.text_color(theme.text.secondary)),
+                        ),
                 )
                 .into_any_element(),
         };
-        let tile = v_flex()
-            .size_full()
-            .items_center()
-            .gap(theme.spacing.xs)
-            .p(theme.spacing.sm)
-            .when(self.cut.contains(&id), |d| d.opacity(0.5))
-            .child(art)
-            .child(label);
+        // The grid fills a selected cell whole; a lit tile covers that with the listing's own
+        // background and draws Finder's selection instead: a plate behind the picture and the
+        // name on an accent pill.
+        let tile = div().w_full().h(px(TILE.1)).when(lit, |d| d.bg(theme.surface.base)).child(
+            v_flex()
+                .size_full()
+                .items_center()
+                .gap(theme.spacing.xs)
+                .p(theme.spacing.sm)
+                .when(self.cut.contains(&id), |d| d.opacity(0.5))
+                .child(art)
+                .child(label),
+        );
         self.file_events(tile, id, cx).into_any_element()
     }
 
@@ -1186,6 +1234,40 @@ pub fn stem_chars(name: &str, folder: bool) -> usize {
 }
 
 /// The size column: bytes for files, the count for a folder once something counted it.
+/// A folder, or a link not yet stat'd that may turn out to be one.
+fn listed_folder(e: &Entry) -> bool {
+    e.is_dir() || matches!(e.kind, EntryKind::Symlink { .. }) && e.meta.is_none()
+}
+
+/// The search field's filter over names: case-insensitive unless the text has a capital.
+struct Filter {
+    needle: String,
+    exact: bool,
+}
+
+impl Filter {
+    fn new(query: &str) -> Self {
+        let exact = query.chars().any(char::is_uppercase);
+        Self { needle: if exact { query.to_owned() } else { query.to_lowercase() }, exact }
+    }
+
+    fn matches(&self, name: &str) -> bool {
+        let n = self.needle.as_bytes();
+        if n.is_empty() {
+            return true;
+        }
+        if self.exact {
+            return name.contains(&self.needle);
+        }
+        // ASCII names compare in place; lowercasing each one allocates, which a keystroke over
+        // 100k names feels.
+        if name.is_ascii() {
+            return n.len() <= name.len() && name.as_bytes().windows(n.len()).any(|w| w.eq_ignore_ascii_case(n));
+        }
+        name.to_lowercase().contains(&self.needle)
+    }
+}
+
 fn size_text(e: &Entry) -> String {
     match &e.meta {
         Some(m) if m.kind.is_dir() => m.child_count.map_or_else(|| "--".to_owned(), |n| format::items(n as usize)),
@@ -1238,6 +1320,13 @@ impl Render for Tab {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         if let Some(id) = self.focus_next.take() {
             window.focus(id);
+        }
+        if self.names_traced != self.generation && !self.visible.is_empty() {
+            self.names_traced = self.generation;
+            crate::trace::mark("names");
+        }
+        if self.view == View::Grid {
+            self.light_tiles(cx);
         }
         let width = self.width;
         let theme = cx.theme();

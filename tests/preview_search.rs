@@ -112,6 +112,7 @@ impl Harness {
     }
 
     fn search(&mut self, text: &str) {
+        self.act(FocusSearch);
         let window = self.window.id();
         let field = by_test_id(&mut self.cx, window, "search").expect("a search field");
         self.cx.emit(field.id, nd::components::TextChanged { text: text.into() });

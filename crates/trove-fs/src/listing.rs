@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 use inotify::{EventMask, Inotify, WatchMask};
 
 use crate::entry::{Entry, EntryId, EntryKind, Meta};
-use crate::volumes::path_is_network;
+use crate::volumes::network_here;
 
 const FIRST_CHUNK: usize = 256;
 const MAX_CHUNK: usize = 2048;
@@ -211,7 +211,7 @@ fn run(dir: &Path, ctx: &Ctx) {
     });
     let mut first_guard = Some(first_tx);
 
-    let network = path_is_network(dir);
+    let (network, mounts) = network_here(dir);
     let rd = match fs::read_dir(dir) {
         Ok(rd) => rd,
         Err(e) => {
@@ -222,7 +222,7 @@ fn run(dir: &Path, ctx: &Ctx) {
     // Armed before readdir so nothing that happens during the listing is missed.
     let watcher = if network { None } else { Watcher::new(dir) };
 
-    let mut pool = Pool::new(dir, ctx, network);
+    let mut pool = Pool::new(dir, ctx, network, mounts);
     let mut known: Vec<EntryId> = Vec::new();
     let mut chunk: Vec<Entry> = Vec::with_capacity(FIRST_CHUNK);
     let mut limit = FIRST_CHUNK;
@@ -296,10 +296,12 @@ struct Pool {
     workers: Vec<JoinHandle<()>>,
     max_workers: usize,
     job_size: usize,
+    /// Network mount points in the folder, which keep their readdir kind and get no stat.
+    unstatted: HashSet<String>,
 }
 
 impl Pool {
-    fn new(dir: &Path, ctx: &Ctx, network: bool) -> Self {
+    fn new(dir: &Path, ctx: &Ctx, network: bool, unstatted: HashSet<String>) -> Self {
         let (jobs_tx, jobs_rx) = flume::unbounded();
         Self {
             dir: Arc::new(dir.to_path_buf()),
@@ -309,11 +311,13 @@ impl Pool {
             workers: Vec::new(),
             max_workers: if network { 2 } else { 8 },
             job_size: if network { 8 } else { 256 },
+            unstatted,
         }
     }
 
     fn jobs_for(&self, entries: &[Entry]) -> Vec<Job> {
-        entries.chunks(self.job_size).map(|c| c.iter().map(|e| (e.id, e.name.clone())).collect()).collect()
+        let statted: Vec<&Entry> = entries.iter().filter(|e| !self.unstatted.contains(&*e.name)).collect();
+        statted.chunks(self.job_size).map(|c| c.iter().map(|e| (e.id, e.name.clone())).collect()).collect()
     }
 
     fn submit(&mut self, jobs: Vec<Job>) {

@@ -251,6 +251,17 @@ impl Thumbnails {
     }
 }
 
+/// Nice 10 for the calling thread, so a burst of decodes on a four-core laptop yields to the
+/// window's thread.
+fn lower_priority() {
+    #[cfg(target_os = "linux")]
+    // SAFETY: setpriority on the calling thread's id, with integer arguments.
+    unsafe {
+        let tid = libc::syscall(libc::SYS_gettid) as libc::id_t;
+        libc::setpriority(libc::PRIO_PROCESS, tid, 10);
+    }
+}
+
 impl Drop for Thumbnails {
     fn drop(&mut self) {
         let mut st = self.shared.lock();
@@ -263,6 +274,7 @@ impl Drop for Thumbnails {
 }
 
 fn worker(shared: &Shared, engine: &Engine, tx: &flume::Sender<(PathBuf, Option<PathBuf>)>) {
+    lower_priority();
     loop {
         let job = {
             let mut st = shared.lock();
