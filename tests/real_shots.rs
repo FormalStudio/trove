@@ -175,8 +175,7 @@ fn real_docs_images() {
     keys("ctrl-1 ctrl-f", 400);
     app.get_by_test_id("search").type_text("re").unwrap();
     std::thread::sleep(Duration::from_millis(600));
-    let scope = app.get_by_test_id("search-scope").bounding_box().unwrap().unwrap();
-    app.mouse().click(scope.x + scope.width * 0.75, scope.y + scope.height / 2.).unwrap();
+    app.get_by_test_id("search-scope-home").click().unwrap();
     std::thread::sleep(Duration::from_millis(1000));
     grab("search");
 }

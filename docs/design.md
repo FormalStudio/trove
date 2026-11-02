@@ -14,10 +14,11 @@ search that finds a file anywhere in the home directory before the user finishes
 | Search across an indexed home of 500k files, per keystroke | under 30 ms to ranked results | 0.4 to 2.4 ms median per word (343k entries) |
 | Idle CPU, window open, nothing changing | 0% | 0 to 1 tick in 60 s, focused and behind another window, on the demo home and on a 100k-entry folder |
 | Scrolling a 100k-entry folder | no missed frames at 60 Hz | p95 16.8 ms, 1 missed frame in 718 (the listing's last batch) |
-| Resident memory with a 100k-entry folder open | under 150 MB | 145 MB |
+| Resident memory with a 100k-entry folder open | under 150 MB | 145 MB (72 MB on the demo home); 231 MB with every Vulkan driver loaded, since g815's NVIDIA and lavapipe drivers map 83 MB the app never draws with |
 
 Measured on g815 pinned to its E-cores (`taskset -c 8-15`), on its Intel GPU alone, with
-`tests/real_perf.rs` (`ND_REAL=1`, ignored by default).
+`tests/real_perf.rs` (`ND_REAL=1`, ignored by default), which hands the app Intel's Vulkan driver
+alone (`VK_DRIVER_FILES`).
 
 Nothing that can block runs on the main thread: no stat, no readdir, no statvfs, no thumbnail
 decode, no index load. Startup reads only small procfs and config files (`/proc/self/mountinfo`,
@@ -340,8 +341,8 @@ index is over 5 minutes old a query also walks its scope 3 levels deep to catch 
   window with the same content larger and "Open with <app>"; arrows step through the selection,
   or through the folder with one selected; Space or Escape closes).
 - Search results: from the second character, a recursive search of the folder (or Home, by the
-  scope switch) replaces the listing with Name (matches in the accent), Folder, Kind, Modified.
-  The preview follows the result selection; Escape puts the folder back with its selection.
+  "Search:" scope row) replaces the listing with Name (matches in the accent), Folder, Kind,
+  Modified. The preview follows the result selection; Escape puts the folder back with its selection.
 - Status bar: item count, selection count and size, free space, running jobs with progress and
   cancel. Conflicts open a sheet: Replace (Merge for two folders), Skip, Keep both, Apply to
   all, Cancel. A failure shows as a toast with the reason.

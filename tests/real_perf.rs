@@ -4,9 +4,9 @@
 //!
 //! `TROVE_BIN` is the binary (build it with `cargo build --release`), `TROVE_CPUS` the cores it
 //! runs on (`taskset -c`, default `8-15`: g815's first eight E-cores, the nearest thing to an
-//! i3-N305). Run one at a time, with the machine otherwise quiet:
-//! `ND_REAL=1 TROVE_BIN=target/release/trove cargo test --release --test real_perf -- --ignored
-//! --nocapture --test-threads 1`.
+//! i3-N305), `TROVE_VK_DRIVER` the one Vulkan driver it loads (default Intel's). Run one at a
+//! time, with the machine otherwise quiet: `ND_REAL=1 TROVE_BIN=target/release/trove cargo test
+//! --release --test real_perf -- --ignored --nocapture --test-threads 1`.
 #![cfg(target_os = "linux")]
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::print_stdout)]
 
@@ -26,6 +26,15 @@ fn bin() -> String {
 
 fn cpus() -> String {
     std::env::var("TROVE_CPUS").unwrap_or_else(|_| "8-15".to_owned())
+}
+
+/// The Vulkan driver the app may load (`TROVE_VK_DRIVER`, default Intel's): the reference
+/// machine has an Intel GPU alone, and on g815 the loader otherwise maps the NVIDIA and lavapipe
+/// drivers too, about 83 MB of resident memory the app never draws with.
+fn vk_driver() -> Option<String> {
+    let path =
+        std::env::var("TROVE_VK_DRIVER").unwrap_or_else(|_| "/usr/share/vulkan/icd.d/intel_icd.x86_64.json".into());
+    std::path::Path::new(&path).exists().then_some(path)
 }
 
 fn compositor() -> Hyprland {
@@ -49,6 +58,9 @@ impl Run {
         let data = tempfile::tempdir().unwrap();
         let mut cmd = c.command("taskset");
         cmd.arg("-c").arg(cpus()).arg(bin()).args(args);
+        if let Some(driver) = vk_driver() {
+            cmd.env("VK_DRIVER_FILES", driver);
+        }
         cmd.env("TROVE_TRACE", "1")
             .env("ND_APP_DATA_DIR", data.path().join("data"))
             .env("XDG_CACHE_HOME", data.path().join("cache"))

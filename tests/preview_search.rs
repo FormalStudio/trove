@@ -10,7 +10,7 @@ use std::sync::OnceLock;
 use std::time::Duration;
 
 use nd::prelude::*;
-use nd::test::{Size, TestApp, by_test_id};
+use nd::test::{Size, TestApp, TextProps, by_test_id};
 use trove::actions::*;
 use trove::keys::{
     CloseQuickLook, ColumnsView, FocusResults, QuickLook, QuickLookNext, QuickLookPrevious, ShowInFolder,
@@ -269,6 +269,45 @@ fn search_lists_matches_below_the_folder_and_escape_restores_it() {
     h.act(ClearSearch);
     assert!(!h.tab().read(&h.cx).showing_results());
     assert_eq!(h.tab().read(&h.cx).selected_names(), ["photo.png"], "the folder's selection is back");
+}
+
+/// The spans of the rich text drawn for `name`, as (text, accent, semibold).
+fn drawn_spans(h: &TestApp, name: &str) -> Vec<(String, bool, bool)> {
+    let backend = h.backend();
+    let found = backend.find(|_, p| p.downcast_ref::<TextProps>().is_some_and(|t| t.rich.is_some() && t.text == name));
+    let id = *found.first().unwrap_or_else(|| panic!("no rich text drawn for {name}"));
+    let props = backend.props(id).and_then(|p| p.downcast_ref::<TextProps>()).and_then(|t| t.rich.clone()).unwrap();
+    props
+        .spans()
+        .iter()
+        .map(|s| (s.text.to_string(), s.style.color() == Some(TextColor::Accent), s.style.semibold))
+        .collect()
+}
+
+#[test]
+fn result_names_draw_their_matches_in_the_accent() {
+    let mut h = Harness::at(look());
+    h.search("draft");
+    assert_eq!(
+        drawn_spans(&h.cx, "report-draft.md"),
+        [("report-".to_owned(), false, false), ("draft".to_owned(), true, true), (".md".to_owned(), false, false)]
+    );
+}
+
+#[test]
+fn the_scope_row_marks_the_scope_searched() {
+    let mut h = Harness::at(look());
+    h.search("report");
+    let window = h.window.id();
+    let checked = |h: &mut Harness, id: &str| by_test_id(&mut h.cx, window, id).expect(id).checked;
+    assert_eq!(checked(&mut h, "search-scope-folder"), Some(true));
+    assert_eq!(checked(&mut h, "search-scope-home"), Some(false));
+    nd::test::click(&mut h.cx, window, "search-scope-home");
+    h.settle();
+    assert_eq!(h.tab().read(&h.cx).results().scope(), Scope::Home);
+    assert_eq!(checked(&mut h, "search-scope-folder"), Some(false));
+    assert_eq!(checked(&mut h, "search-scope-home"), Some(true));
+    assert!(h.result_names().contains(&"report-home.txt".to_owned()), "{:?}", h.result_names());
 }
 
 #[test]

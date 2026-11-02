@@ -585,15 +585,27 @@ pub fn render(tab: &mut Tab, width: f32, cx: &mut Context<Tab>) -> AnyElement {
     let scope_dir = scope_dir(tab);
     let state = state_line(&scope_dir, &home, r.done, &index, cx);
 
-    let switch = folder.clone().map(|name| {
-        let to = me.clone();
-        segmented("search-scope", [name, "Home".to_owned()])
-            .label("Search in")
-            .selected(if scope == Scope::Folder { 0 } else { 1 })
-            .on_change(move |e: &SelectChanged, _, cx| {
-                let scope = if e.index == 0 { Scope::Folder } else { Scope::Home };
-                let _ = to.update(cx, |t, cx| set_scope(t, scope, cx));
-            })
+    // Finder's scope row: the scope searched is the filled button, in light and dark alike.
+    let switch = folder.map(|name| {
+        let scope_button = |id: &'static str, label: String, this: Scope| {
+            let to = me.clone();
+            let active = scope == this;
+            button(id, label)
+                .variant(if active { ButtonVariant::Accent } else { ButtonVariant::Standard })
+                .when(!active, |b| b.bezel(Bezel::Borderless))
+                .checked(active)
+                .on_click(move |_: &ClickEvent, _, cx| {
+                    let _ = to.update(cx, |t, cx| set_scope(t, this, cx));
+                })
+        };
+        h_flex()
+            .id("search-scope")
+            .gap(theme.spacing.xs)
+            .items_center()
+            .flex_shrink_0()
+            .child(text("Search:").text_color(theme.text.secondary))
+            .child(scope_button("search-scope-folder", format!("This folder \u{201c}{name}\u{201d}"), Scope::Folder))
+            .child(scope_button("search-scope-home", "Home".to_owned(), Scope::Home))
             .into_any_element()
     });
     let hint_open = r.hint;
