@@ -1,7 +1,8 @@
-//! Tier 3: the README and website screenshot. The demo fixture in a private headless Hyprland at
-//! 1920x1080, the window filling the output, the list view with the preview pane open on a
-//! picture. Dark and light go to `artifacts/shots/readme-{dark,light}.png`; `scripts/shots`
-//! copies the dark one to `docs/shots/linux.png`.
+//! Tier 3: the README's images and the website screenshot, the demo fixture in a private headless
+//! Hyprland with the window filling the output. The website's is the list view with the preview
+//! pane open on a picture at 1920x1080, dark and light, in `artifacts/shots/readme-*.png`; the
+//! README's are 1600x1000 and dark, in `artifacts/shots/images/`. `scripts/shots` copies both
+//! into `docs/`.
 //!
 //! It opens real windows, so it runs only under nextest or with `ND_REAL=1`.
 #![cfg(target_os = "linux")]
@@ -111,4 +112,71 @@ fn real_readme_screenshot() {
         println!("screenshot {}", out.display());
         drop(app);
     }
+}
+
+/// The README's images: the demo fixture in a 1600x1000 output, dark, the window filling it.
+/// Each lands in `artifacts/shots/images/<name>.png`; `scripts/shots` copies them to
+/// `docs/images/`.
+#[test]
+fn real_docs_images() {
+    if !real_allowed() {
+        println!("skipped: opens a real window; run with ND_REAL=1");
+        return;
+    }
+    const W: u32 = 1600;
+    const H: u32 = 1000;
+    let extra_config = format!(
+        r#"hl.window_rule({{ name = "trove-fill", match = {{ class = "dev.formalsnake.trove" }}, size = "{W} {H}", move = "0 0" }})"#
+    );
+    let compositor = Hyprland::start(Options { width: W, height: H, extra_config, ..Default::default() }).unwrap();
+    let env = compositor.client_env();
+    let runtime = env.iter().find(|(k, _)| *k == "XDG_RUNTIME_DIR").map(|(_, v)| v.clone()).unwrap();
+    pictures(&Path::new(&runtime).join("trove-demo").join("Gallery"));
+    let shots = Path::new(env!("CARGO_MANIFEST_DIR")).join("artifacts").join("shots");
+    let images = shots.join("images");
+    std::fs::create_dir_all(&images).unwrap();
+    let toml = shots.join("theme-dark.toml");
+    std::fs::write(&toml, "appearance = \"dark\"\n").unwrap();
+    let grab = |name: &str| {
+        let out = images.join(format!("{name}.png"));
+        let status = compositor.command("grim").arg("-l").arg("9").arg(&out).status().unwrap();
+        assert!(status.success(), "grim failed");
+        println!("screenshot {}", out.display());
+    };
+
+    let mut options = LaunchOptions::new(bin()).env("TROVE_DEMO", "1").env("ND_THEME_TOML", toml.display().to_string());
+    for (key, value) in &env {
+        options = options.env(*key, value.clone());
+    }
+    let app = launch_app(options).unwrap();
+    let keys = |k: &str, settle: u64| {
+        app.keyboard().press(k).unwrap();
+        std::thread::sleep(Duration::from_millis(settle));
+    };
+    expect(&app.get_by_test_id("files-table")).to_be_visible().unwrap();
+    std::thread::sleep(Duration::from_millis(600));
+
+    // A second tab, in the gallery, with a picture in the preview pane.
+    keys("ctrl-t", 400);
+    keys("g a l enter", 600);
+    keys("f j o ctrl-i", 1500);
+    grab("list");
+
+    keys("ctrl-i ctrl-2", 1500);
+    grab("grid");
+
+    keys("ctrl-1 space", 1200);
+    grab("quicklook");
+
+    keys("space ctrl-3", 1500);
+    grab("columns");
+
+    // The gallery's search, switched to all of Home.
+    keys("ctrl-1 ctrl-f", 400);
+    app.get_by_test_id("search").type_text("re").unwrap();
+    std::thread::sleep(Duration::from_millis(600));
+    let scope = app.get_by_test_id("search-scope").bounding_box().unwrap().unwrap();
+    app.mouse().click(scope.x + scope.width * 0.75, scope.y + scope.height / 2.).unwrap();
+    std::thread::sleep(Duration::from_millis(1000));
+    grab("search");
 }

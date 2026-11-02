@@ -12,7 +12,7 @@ search that finds a file anywhere in the home directory before the user finishes
 | First names of a 10k-entry local folder on screen | under 50 ms after navigation | 10 ms for 100k entries, all listed in 61 to 98 ms |
 | A folder on a dead NFS/SMB mount | the window stays responsive; "Waiting for server" after 1 s | shown at 1064 ms, the window answering in 1 ms |
 | Search across an indexed home of 500k files, per keystroke | under 30 ms to ranked results | 0.4 to 2.4 ms median per word (343k entries) |
-| Idle CPU, window open, nothing changing | 0% | 0 ticks in 10 s; 2 to 3 ticks in 20 s with a shell `theme.json` present (nd's theme watcher) |
+| Idle CPU, window open, nothing changing | 0% | 0 to 1 tick in 60 s, focused and behind another window, on the demo home and on a 100k-entry folder |
 | Scrolling a 100k-entry folder | no missed frames at 60 Hz | p95 16.8 ms, 1 missed frame in 718 (the listing's last batch) |
 | Resident memory with a 100k-entry folder open | under 150 MB | 145 MB |
 
@@ -320,7 +320,7 @@ index is over 5 minutes old a query also walks its scope 3 levels deep to catch 
   completion), view switch (list, grid, columns), the search field, always there as in Finder
   (scoped to the current folder, a toggle to search everywhere), the preview toggle.
 - Tabs, Explorer-style: Ctrl+T new tab at the current folder, Ctrl+W close, Ctrl+Tab and
-  Ctrl+Shift+Tab, Ctrl+1..9, middle-click a folder or Ctrl+Enter to open it in a new tab, drag a
+  Ctrl+Shift+Tab, Alt+1..9, middle-click a folder or Ctrl+Enter to open it in a new tab, drag a
   file onto a tab to move it there. Middle-click a tab to close it; right-click it for Duplicate,
   Close and Close others. Each tab keeps its own history, selection, scroll, view and sort. The
   tab strip hides with one tab, like GNOME Files.

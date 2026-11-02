@@ -1,34 +1,49 @@
-<p align="center">
-  <img src="packaging/linux/dev.formalsnake.trove.png" width="160" alt="Trove icon">
-</p>
+<p align="center"><img src="packaging/linux/dev.formalsnake.trove.png" width="160" alt="Trove icon"></p>
 
 # Trove
 
-[![Built with NativeDesktop](https://img.shields.io/badge/built_with-NativeDesktop-4a9eda?style=for-the-badge&labelColor=161616)](https://github.com/FormalStudio/NativeDesktop)
-[![Rust](https://img.shields.io/badge/rust-2024-4a9eda?style=for-the-badge&labelColor=161616&logo=rust&logoColor=white)](src/)
+A file manager for Linux that opens at once, even with a dead network mount in the sidebar.
+Rust on [NativeDesktop](https://github.com/FormalStudio/NativeDesktop) (GPUI on Linux), with
+tabs, three views, a preview pane, Quick Look and search across Home.
 
-A file manager for Linux that opens instantly, even with a dead network mount in the sidebar.
+![The list view with the preview pane on a picture](docs/images/list.png)
 
-![Trove](docs/shots/linux.png)
+```
+┌────────────────────────┐  flume   ┌───────────────────────────────────────────────┐
+│ trove (nd, GPUI)       │ ───────▶ │ trove-fs       listing threads, inotify       │
+│ window, tabs, sidebar, │          │ trove-ops      the operation queue            │
+│ views, preview pane    │ ◀─────── │ trove-preview  previews, thumbnail pool       │
+└────────────────────────┘          │ trove-search   index of Home, query engine    │
+                                    └───────────────────────────────────────────────┘
+```
 
-A release build reaches its first frame about 148 ms after the process starts (g815, private
-headless Hyprland, median of ten launches, `tests/real.rs`). Each tab streams its folder from
-worker threads: names land first, sizes and dates fill in as they are read, and leaving a folder
-drops its listing instead of waiting for it. The first frame waits on nothing but a few small
-config files, so a mount that never answers cannot hold the window back.
+The window thread never touches the disk: listings, stats, previews, thumbnails, copies and
+search run on the core crates' own threads and report back over channels. Pinned to g815's
+E-cores, a release build reaches its first frame in 178 ms whatever is mounted, shows the first
+names of a 100k-entry folder 10 ms after you enter it, and ranks search results across 343k
+entries in 0.4 to 2.4 ms per keystroke. Left alone it used at most one 10 ms tick of CPU in a
+minute, focused or behind another window.
+
+| | |
+|---|---|
+| ![Grid view with thumbnails](docs/images/grid.png) | ![Search across Home](docs/images/search.png) |
+| ![Quick Look](docs/images/quicklook.png) | ![Columns view](docs/images/columns.png) |
 
 ## Features
 
-- Tabs with their own history, folder, selection, sort and view: Ctrl+T, Ctrl+W, Ctrl+Tab, Ctrl+1..9.
+- Tabs with their own history, folder, selection, sort and view: Ctrl+T, Ctrl+W, Ctrl+Tab,
+  Alt+1..9. Middle-click a folder to open it in a tab, or a tab to close it.
 - List, grid and columns views. Thumbnails are made off the main thread.
 - Search from the second character, across the folder or all of Home, with a query language:
   `ext:pdf`, `kind:image`, `size:>10mb`, `modified:week`, `in:projects`, `"exact phrase"`,
   `*.rs` globs. Ranked results update per keystroke from a background index of Home.
 - A preview pane (Ctrl+I) for pictures, text, folders, archives and audio, and Quick Look on Space.
+- A sidebar of places, bookmarks and devices with their free space, each row with its own menu.
+  The sidebar and the preview pane resize, and keep their widths.
 - Network mounts are never touched until clicked. A folder that is slow to answer says "Waiting
   for server" after one second and the window stays responsive.
 - Copy, move, rename, trash, restore, compress and extract run as queued jobs with progress,
-  conflict handling and undo.
+  conflict handling and undo. Hold Ctrl while dragging to copy, Shift to move.
 - Interop with the rest of the desktop: the freedesktop Trash, the shared thumbnail cache, GTK
   bookmarks, `recently-used.xbel`, and the GNOME Files clipboard format.
 - Follows the system: light and dark, the accent colour, and matugen palettes, live.
@@ -78,7 +93,8 @@ network_thumbnails = false
 
 The full table is in [docs/design.md](docs/design.md#keys). The ones to know: Enter opens,
 Backspace goes up, Space is Quick Look, F2 renames, Ctrl+F searches, Ctrl+L edits the path,
-Ctrl+H shows hidden files, Ctrl+1/2/3 switch view. `Cmd` replaces `Ctrl` on macOS.
+Ctrl+H shows hidden files, Ctrl+1/2/3 switch view, Alt+1..9 switch tab. `Cmd` replaces `Ctrl`
+on macOS.
 
 ## Development
 
@@ -87,7 +103,7 @@ just dev                  # run it; TROVE_DEMO=1 just dev for demo state
 nd check                  # fmt, clippy, framework lints, appearance audit
 nd test                   # tiers 1 and 2, parallel, no window
 nd test --tier real       # tier 3, real windows
-scripts/shots linux       # regenerate docs/shots/linux.png
+scripts/shots linux       # regenerate docs/images/ and docs/shots/linux.png
 ```
 
 `src/root.rs` is the window and `src/tab.rs` one tab. `crates/` holds the file system, operations,

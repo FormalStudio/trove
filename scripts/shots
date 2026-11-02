@@ -1,12 +1,14 @@
 #!/usr/bin/env bash
-# Regenerates the README and website screenshots: docs/shots/<os>.png, dark, 1920x1080, the list
-# view with the preview pane open on the demo fixture (TROVE_DEMO=1).
+# Regenerates the README and website screenshots on the demo fixture (TROVE_DEMO=1):
+# docs/shots/<os>.png, dark, 1920x1080, the list view with the preview pane open, and the
+# README's docs/images/*.png, dark, 1600x1000.
 #
 #   scripts/shots linux|all
 #
 # linux runs tests/real_shots.rs: a release build inside nd's private headless Hyprland, never
-# the session you are in. It writes docs/shots/linux.png (dark) and linux-light.png. macos and
-# windows are not captured yet; `all` skips them and says so.
+# the session you are in. It writes docs/shots/linux.png (dark), linux-light.png and
+# docs/images/{list,grid,search,quicklook,columns}.png. macos and windows are not captured yet;
+# `all` skips them and says so.
 set -euo pipefail
 
 root=$(cd "$(dirname "$0")/.." && pwd)
@@ -21,6 +23,8 @@ linux() {
     fspec dev -- cargo test --release --test real_shots -- --nocapture
   cp "$root/artifacts/shots/readme-dark.png" "$shots/linux.png"
   cp "$root/artifacts/shots/readme-light.png" "$shots/linux-light.png"
+  mkdir -p "$root/docs/images"
+  cp "$root"/artifacts/shots/images/*.png "$root/docs/images/"
   echo "$shots/linux.png"
 }
 
@@ -31,7 +35,7 @@ case "${1:-}" in
     echo "macos and windows shots are not captured yet" >&2
     ;;
   *)
-    sed -n '2,9p' "$0"
+    sed -n '2,11p' "$0"
     exit 2
     ;;
 esac
