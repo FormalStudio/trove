@@ -402,6 +402,10 @@ fn a_path_bar_segment_has_its_own_menu() {
     let mut h = Harness::new(&["a.txt"]);
     let menu = h.menu_on("crumb-current");
     assert_eq!(menu, ["Open in new tab", "Open in terminal", "Copy path", "-", "Folders beside it >"], "{menu:?}");
+    // The harness lays the bar out at its minimum width, which folds every ancestor away.
+    let bar = h.root().read(&h.cx).pathbar().clone();
+    bar.update(&mut h.cx, |b, cx| b.set_width(900., cx));
+    h.settle();
     let menu = h.menu_on("crumb-drop-0");
     assert_eq!(menu[..3], ["Open in new tab", "Open in terminal", "Copy path"], "{menu:?}");
 }

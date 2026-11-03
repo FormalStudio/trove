@@ -20,6 +20,15 @@ type OnGo = Rc<dyn Fn(Location, &mut Window, &mut App)>;
 
 /// More segments than this fold the middle ones into the menu.
 const MAX_SEGMENTS: usize = 5;
+/// Rough widths for fitting crumbs before they are laid out; generous, so a crumb that does not
+/// fit folds rather than clips. A character, a button's padding, an icon, a chevron, the "..."
+/// button, and the room kept for the click target that opens the field.
+const CHAR_W: f32 = 8.;
+const CRUMB_PAD: f32 = 24.;
+const ICON_W: f32 = 22.;
+const CHEVRON_W: f32 = 20.;
+const MORE_W: f32 = 36.;
+const END_W: f32 = 24.;
 /// The most folders a segment's menu lists beside it.
 const MAX_SIBLINGS: usize = 100;
 pub const FIELD: &str = "path-edit";
@@ -42,6 +51,8 @@ pub struct PathBar {
     /// they were read for.
     siblings: HashMap<PathBuf, Vec<String>>,
     siblings_of: Option<Location>,
+    /// The bar's laid-out width, once it has one.
+    width: Option<f32>,
 }
 
 impl PathBar {
@@ -55,6 +66,14 @@ impl PathBar {
             on_go: Rc::new(on_go),
             siblings: HashMap::new(),
             siblings_of: None,
+            width: None,
+        }
+    }
+
+    pub fn set_width(&mut self, width: f32, cx: &mut Context<Self>) {
+        if width > 1. && self.width.is_none_or(|w| (w - width).abs() > 0.5) {
+            self.width = Some(width);
+            cx.notify();
         }
     }
 
@@ -288,15 +307,56 @@ pub fn segments(location: &Location, volumes: &[Volume]) -> Vec<Segment> {
     out
 }
 
-/// Which segments show and which fold into the menu: the first, then the last few.
-fn fold(segments: &[Segment]) -> (Vec<(usize, &Segment)>, Vec<&Segment>) {
-    if segments.len() <= MAX_SEGMENTS {
+fn crumb_width(seg: &Segment) -> f32 {
+    CHEVRON_W + CRUMB_PAD + CHAR_W * seg.label.chars().count() as f32 + if seg.icon.is_some() { ICON_W } else { 0. }
+}
+
+/// Which segments show and which fold into the menu. The current folder always shows. Crumbs
+/// fold from the middle outwards, the ones next to the current folder last, then the first one
+/// goes too. Without a width yet, the first and the last few show.
+fn fold(segments: &[Segment], width: Option<f32>) -> (Vec<(usize, &Segment)>, Vec<&Segment>) {
+    let n = segments.len();
+    let tail_for = |with_first: bool, budget: f32| -> usize {
+        let cap = if with_first { MAX_SEGMENTS - 1 } else { MAX_SEGMENTS }.min(n);
+        let first = if with_first { crumb_width(&segments[0]) } else { 0. };
+        let mut t = 1;
+        let mut used = first + crumb_width(&segments[n - 1]);
+        while t < cap {
+            let next = used + crumb_width(&segments[n - 1 - t]);
+            let hidden = n - t - 1 > usize::from(with_first);
+            if next + if hidden { MORE_W } else { 0. } > budget {
+                break;
+            }
+            used = next;
+            t += 1;
+        }
+        t
+    };
+    if n <= 1 {
         return (segments.iter().enumerate().collect(), Vec::new());
     }
-    let tail = MAX_SEGMENTS - 2;
-    let cut = segments.len() - tail;
-    let shown = std::iter::once((0, &segments[0])).chain(segments.iter().enumerate().skip(cut)).collect();
-    (shown, segments[1..cut].iter().collect())
+    let Some(budget) = width.map(|w| w - END_W) else {
+        if n <= MAX_SEGMENTS {
+            return (segments.iter().enumerate().collect(), Vec::new());
+        }
+        let cut = n - (MAX_SEGMENTS - 2);
+        let shown = std::iter::once((0, &segments[0])).chain(segments.iter().enumerate().skip(cut)).collect();
+        return (shown, segments[1..cut].iter().collect());
+    };
+    let all: f32 = segments.iter().map(crumb_width).sum();
+    if n <= MAX_SEGMENTS && all <= budget {
+        return (segments.iter().enumerate().collect(), Vec::new());
+    }
+    let with_first = crumb_width(&segments[0]) + MORE_W + crumb_width(&segments[n - 1]) <= budget;
+    let t = tail_for(with_first, budget).min(n - usize::from(with_first));
+    let cut = n - t;
+    let mut shown: Vec<(usize, &Segment)> = Vec::new();
+    if with_first {
+        shown.push((0, &segments[0]));
+    }
+    shown.extend(segments.iter().enumerate().skip(cut));
+    let folded = segments[usize::from(with_first)..cut].iter().collect();
+    (shown, folded)
 }
 
 impl Render for PathBar {
@@ -324,15 +384,27 @@ impl Render for PathBar {
                 .into_any_element();
         }
         let segments = self.segments();
-        let (shown, folded) = fold(&segments);
+        let (shown, folded) = fold(&segments, self.width);
         let last = segments.len().saturating_sub(1);
-        let mut row =
-            h_flex().id("pathbar").min_w(px(120.)).flex_1().overflow_hidden().items_center().gap(theme.spacing.xs);
+        let resized = cx.weak_entity();
+        let mut row = h_flex()
+            .id("pathbar")
+            .min_w(px(120.))
+            .flex_1()
+            .overflow_hidden()
+            .items_center()
+            .gap(theme.spacing.xs)
+            .on_resize(move |e, _, cx| {
+                let _ = resized.update(cx, |this, cx| this.set_width(e.width, cx));
+            });
+        let mut previous: Option<usize> = None;
         for (n, (i, seg)) in shown.iter().enumerate() {
             if n > 0 {
                 row = row.child(icon(Icon::ChevronRight, 12.).text_color(theme.text.tertiary));
             }
-            if n == 1 && !folded.is_empty() {
+            let gap = if n == 0 { *i > 0 } else { previous.is_some_and(|p| p + 1 < *i) };
+            previous = Some(*i);
+            if gap && !folded.is_empty() {
                 let items: Vec<(String, PathBuf)> =
                     folded.iter().filter_map(|s| Some((s.label.clone(), s.location.dir()?.to_path_buf()))).collect();
                 row = row
@@ -410,14 +482,38 @@ mod tests {
         assert_eq!(common_prefix("a", ""), "");
     }
 
+    fn seg(l: &str) -> Segment {
+        Segment { label: l.into(), location: Location::Recent, icon: None }
+    }
+
+    fn labels(v: &[(usize, &Segment)]) -> Vec<String> {
+        v.iter().map(|(_, s)| s.label.clone()).collect()
+    }
+
     #[test]
     fn folding_keeps_the_first_and_the_last_three() {
-        let seg = |l: &str| Segment { label: l.into(), location: Location::Recent, icon: None };
         let all: Vec<Segment> = ["Home", "a", "b", "c", "d", "e", "f"].map(seg).to_vec();
-        let (shown, folded) = fold(&all);
-        let shown: Vec<&str> = shown.iter().map(|(_, s)| s.label.as_str()).collect();
+        let (shown, folded) = fold(&all, None);
         let folded: Vec<&str> = folded.iter().map(|s| s.label.as_str()).collect();
-        assert_eq!(shown, ["Home", "d", "e", "f"]);
+        assert_eq!(labels(&shown), ["Home", "d", "e", "f"]);
         assert_eq!(folded, ["a", "b", "c"]);
+    }
+
+    #[test]
+    fn the_current_folder_shows_at_every_width() {
+        let all: Vec<Segment> = ["Home", "Projects", "trove", "picker-build", "files"].map(seg).to_vec();
+        let mut last_shown = 0;
+        for width in (120..1400).step_by(8) {
+            let (shown, folded) = fold(&all, Some(width as f32));
+            assert_eq!(shown.last().map(|(_, s)| s.label.as_str()), Some("files"), "width {width}");
+            assert_eq!(shown.len() + folded.len(), all.len(), "width {width}");
+            assert!(shown.len() >= last_shown, "width {width} shows fewer than a narrower bar");
+            last_shown = shown.len();
+        }
+        let (shown, _) = fold(&all, Some(180.));
+        assert_eq!(labels(&shown), ["files"]);
+        let (shown, folded) = fold(&all, Some(400.));
+        assert_eq!(labels(&shown), ["Home", "picker-build", "files"]);
+        assert_eq!(folded.len(), 2);
     }
 }
