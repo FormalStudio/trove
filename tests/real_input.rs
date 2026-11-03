@@ -197,9 +197,9 @@ fn real_input_on_the_demo_fixture() {
     // A click selects, and the list then takes the arrows itself.
     let notes = rig.row("Notes.md");
     rig.click(notes);
-    rig.eventually("a click selects the row", |r| r.status().ends_with("1 selected (2.0 kB)"));
+    rig.eventually("a click selects the row", |r| r.status() == "\u{201c}Notes.md\u{201d} selected, 2.0 kB");
     rig.key(key::DOWN, &[]);
-    rig.eventually("Down moves to the next row", |r| r.status().ends_with("1 selected (312 bytes)"));
+    rig.eventually("Down moves to the next row", |r| r.status() == "\u{201c}todo.txt\u{201d} selected, 312 bytes");
     rig.key(key::ESC, &[]);
     rig.eventually("Escape deselects", |r| !r.status().contains("selected"));
 
@@ -208,7 +208,7 @@ fn real_input_on_the_demo_fixture() {
     let below = (todo.0 + 200., todo.1 + 120.);
     rig.input.drag(below, 0., notes.1 - below.1, 12, Duration::from_millis(16)).unwrap();
     settle(300);
-    rig.eventually("the band selects both rows it crossed", |r| r.status().contains("2 selected"));
+    rig.eventually("the band selects both rows it crossed", |r| r.status().starts_with("2 of 10 selected"));
 
     // Escape clears the selection.
     rig.key(key::ESC, &[]);
@@ -243,7 +243,7 @@ fn real_input_on_the_demo_fixture() {
     rig.eventually("the copy lands", |r| r.has_file("Plan copy.md"));
 
     // Delete trashes the selected copy, Ctrl+Z puts it back.
-    rig.eventually("the copy is selected", |r| r.status().ends_with("1 selected (2.0 kB)"));
+    rig.eventually("the copy is selected", |r| r.status() == "\u{201c}Plan copy.md\u{201d} selected, 2.0 kB");
     rig.key(key::DELETE, &[]);
     rig.eventually("Delete trashes it", |r| !r.has_file("Plan copy.md"));
     rig.key(key::Z, &[Modifier::Control]);
@@ -275,7 +275,7 @@ fn real_middle_clicks_and_modifier_drags() {
     let mut rig = Rig::start();
     // The listing has the keys from launch, with nothing clicked yet.
     rig.key(key::DOWN, &[]);
-    rig.eventually("Down selects the first row", |r| r.status().contains("1 selected"));
+    rig.eventually("Down selects the first row", |r| r.status() == "\u{201c}Desktop\u{201d} selected");
 
     // Shift held over a second click selects the range between the two.
     let desktop = rig.row("Desktop");
@@ -284,7 +284,7 @@ fn real_middle_clicks_and_modifier_drags() {
     rig.input.hold(&[Modifier::Shift]).unwrap();
     rig.click(logs);
     rig.input.release().unwrap();
-    rig.eventually("Shift-click selects the range", |r| r.status().contains("4 selected"));
+    rig.eventually("Shift-click selects the range", |r| r.status() == "4 of 10 selected");
 
     // A middle click on a folder opens it in a tab behind this one; one on that tab closes it.
     assert!(!rig.tabs_shown(), "one tab shows no strip");
@@ -299,7 +299,7 @@ fn real_middle_clicks_and_modifier_drags() {
     rig.eventually("a middle click on the tab closes it", |r| !r.tabs_shown());
     // A press while the window still moves from two tabs to one starts no drag.
     settle(1000);
-    assert!(rig.status().starts_with("10 items"), "the first tab still shows Home: {}", rig.status());
+    assert_eq!(rig.status(), "4 of 10 selected", "the first tab still shows Home with its selection");
 
     // Ctrl forces a copy where one file system would move; Shift forces the move.
     rig.drag_holding("todo.txt", "Projects", &[Modifier::Control]);

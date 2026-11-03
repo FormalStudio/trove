@@ -1444,7 +1444,9 @@ impl Render for Tab {
         div()
             .id(VIEW_ID)
             .key_context(if self.renaming.is_some() { RENAMING } else { FILES })
-            .focusable()
+            // The keys wait here only while no list shows: once one does, dropping them lets
+            // `focus_if_lost` hand them on to it.
+            .when(target == VIEW_ID, |d| d.focusable())
             .size_full()
             .flex()
             .flex_col()

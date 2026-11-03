@@ -289,6 +289,26 @@ fn the_list_shown_has_the_keys() {
     assert!(focused(&mut h, "files-table"));
 }
 
+/// The launcher gives the keys to the tab before its folder has answered, so the tab holds them
+/// until the list arrives; the list then takes them, and Down at launch moves through it.
+#[test]
+fn the_list_takes_the_keys_when_the_folder_answers() {
+    let home = fixture().clone();
+    let mut cx = TestApp::new();
+    let window = cx.open_window(Size { width: 1200., height: 800. }, |window, cx| {
+        trove::init(cx);
+        cx.new(|cx| Root::new(trove::Start::Path(home), window, cx))
+    });
+    let id = window.id();
+    let first = window.root().read(&cx).first_focus(&cx);
+    assert_eq!(first, "files", "nothing is listed yet");
+    assert!(cx.focus_id(id, first));
+    let mut h = Harness { cx, window };
+    h.settle();
+    let table = nd::test::by_test_id(&mut h.cx, id, "files-table").expect("the table");
+    assert!(table.focused, "{}", h.cx.semantic_tree().snapshot());
+}
+
 #[test]
 fn the_grid_and_columns_select_through_their_own_lists() {
     let mut h = Harness::new();
