@@ -96,7 +96,7 @@ fn real_header_in_a_narrow_window() {
         assert!(b.2 >= 20., "{id} at {b:?} has no room");
     }
 
-    let mut click = |id: &str, dx: f32| {
+    let click = |input: &mut VirtualInput, id: &str, dx: f32| {
         let (x, y, w, h) = bounds(&app, id);
         let at = (origin.0 + f64::from(x + w * dx), origin.1 + f64::from(y + h / 2.));
         input.click(at.0, at.1).unwrap();
@@ -110,10 +110,15 @@ fn real_header_in_a_narrow_window() {
     grab("header-narrow-search");
     app.keyboard().press("escape").unwrap();
     std::thread::sleep(Duration::from_millis(300));
-    // The view switch's middle segment is Grid.
-    click("view", 0.5);
+    // Here the view switch is folded into one menu button; Grid is its second entry.
+    click(&mut input, "view", 0.5);
+    // Evdev Down twice (List, Grid), then Return.
+    for code in [108, 108, 28] {
+        input.key(code, &[]).unwrap();
+        std::thread::sleep(Duration::from_millis(150));
+    }
     eventually("a click on Grid shows the grid", || app.get_by_test_id("files-grid").count().unwrap_or(0) > 0);
-    click("preview-toggle", 0.5);
+    click(&mut input, "preview-toggle", 0.5);
     eventually("a click on the preview toggle hides the pane", || {
         app.get_by_test_id("nd-inspector").bounding_box().ok().flatten().is_none_or(|b| b.width < 1.)
     });
