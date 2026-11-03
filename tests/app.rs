@@ -262,7 +262,7 @@ fn the_list_owns_the_selection_and_the_cursor() {
     h.act(Back);
     h.pick("files-table", ROOT_NAMES, None);
     let (left, _) = h.root().read(&h.cx).status().read(&h.cx).summary(&h.cx);
-    assert!(left.starts_with("10 items \u{b7} 10 selected ("), "{left}");
+    assert!(left.starts_with("10 of 10 selected, "), "{left}");
     h.pick("files-table", &[], None);
     assert!(h.selected().is_empty(), "a click on empty space clears it");
     assert_eq!(h.tab().read(&h.cx).cursor(), None);

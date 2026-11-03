@@ -50,18 +50,19 @@ impl StatusBar {
                 _ => format::items(shown),
             }
         };
+        // As Finder words it: "“Notes.md” selected, 1.6 kB", "3 of 10 selected, 4.1 MB". The
+        // size counts the files; a folder's own size is not known without walking it.
         let selected = tab.selected();
         if !selected.is_empty() {
-            let bytes: u64 = selected
-                .iter()
-                .filter_map(|id| tab.entry(id))
-                .filter(|e| !e.is_dir())
-                .filter_map(|e| e.meta.as_ref().map(|m| m.size))
-                .sum();
-            let any_file = selected.iter().filter_map(|id| tab.entry(id)).any(|e| !e.is_dir());
-            left.push_str(&format!(" \u{b7} {} selected", format::group(selected.len())));
-            if any_file {
-                left.push_str(&format!(" ({})", format::size(bytes)));
+            let entries: Vec<_> = selected.iter().filter_map(|id| tab.entry(id)).collect();
+            let files: Vec<_> = entries.iter().filter(|e| !e.is_dir()).collect();
+            let bytes: u64 = files.iter().filter_map(|e| e.meta.as_ref().map(|m| m.size)).sum();
+            left = match entries.as_slice() {
+                [one] => format!("\u{201c}{}\u{201d} selected", one.name),
+                _ => format!("{} of {} selected", format::group(selected.len()), format::group(shown)),
+            };
+            if !files.is_empty() {
+                left.push_str(&format!(", {}", format::size(bytes)));
             }
         }
         let right = tab.free().map(|u| format!("{} free", format::size(u.free))).unwrap_or_default();
