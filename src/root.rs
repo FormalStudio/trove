@@ -41,6 +41,17 @@ pub enum Start {
     /// A path from the command line: a folder opens, a file opens its folder with the file
     /// selected. Which one it is shows when the listing answers, never by a stat up front.
     Path(PathBuf),
+    /// A tab for each, the first active: what "Show in folder" asks for.
+    Places(Vec<Place>),
+}
+
+/// One tab of [`Start::Places`].
+#[derive(Clone, Debug, PartialEq)]
+pub enum Place {
+    /// As [`Start::Path`].
+    Path(PathBuf),
+    /// A folder with these items of it selected, the first scrolled to.
+    Items { folder: PathBuf, items: Vec<PathBuf> },
 }
 
 /// What the toolbar and tab strip show of the active tab; the window re-renders only when this
@@ -118,9 +129,10 @@ impl Root {
         crate::settings::init(cx);
         crate::ops::init(cx);
         let prefs = crate::settings::get(cx);
-        let start_path = match &start {
-            Start::Path(p) => Some(p.clone()),
-            _ => None,
+        let places = match &start {
+            Start::Path(p) => vec![Place::Path(p.clone())],
+            Start::Places(places) => places.clone(),
+            Start::Home | Start::Restore(_) => Vec::new(),
         };
         let me = cx.weak_entity();
         let go = move |location: Location, window: &mut Window, cx: &mut App| {
@@ -186,17 +198,26 @@ impl Root {
                 }
                 active = session.active;
             }
-            Start::Home | Start::Path(_) => {}
+            Start::Home | Start::Path(_) | Start::Places(_) => {}
+        }
+        for place in places {
+            let tab = match place {
+                Place::Path(p) => {
+                    let tab = this.make_tab(Location::Dir(p), view, cx);
+                    tab.update(cx, |t, _| t.open_parent_if_file());
+                    tab
+                }
+                Place::Items { folder, items } => {
+                    let tab = this.make_tab(Location::Dir(folder), view, cx);
+                    tab.update(cx, |t, cx| t.reveal_items(&items, cx));
+                    tab
+                }
+            };
+            let id = this.take_id();
+            this.tabs.push((id, tab));
         }
         if this.tabs.is_empty() {
-            let (location, file_check) = match start_path {
-                Some(p) => (Location::Dir(p), true),
-                None => (home, false),
-            };
-            let tab = this.make_tab(location, view, cx);
-            if file_check {
-                tab.update(cx, |t, _| t.open_parent_if_file());
-            }
+            let tab = this.make_tab(home, view, cx);
             let id = this.take_id();
             this.tabs.push((id, tab));
         }
@@ -868,6 +889,11 @@ impl Root {
         };
         match decision {
             Decision::Enter(dir) => self.go(Location::Dir(dir), window, cx),
+            Decision::Go { dir, name } => {
+                picker.update(cx, |p, cx| p.set_name(name, cx));
+                self.go(Location::Dir(dir), window, cx);
+            }
+            Decision::Refuse(title) => nd::chrome::alert(cx, self.window, Alert::new(title), |_, _| {}),
             Decision::Accept(paths) => self.pick_finish(paths, cx),
             Decision::Replace { paths, title } => {
                 let mut alert = Alert::confirm(title, "Replace");

@@ -1,11 +1,12 @@
 //! `trove --portal`: the D-Bus service that makes Trove the desktop's file chooser
 //! (`org.freedesktop.impl.portal.FileChooser`, behind xdg-desktop-portal) and its file manager
 //! (`org.freedesktop.FileManager1`, "Show in folder"). It draws nothing: each pick runs a
-//! `trove --pick` process and reads its outcome over a pipe, and each folder shown is a plain
-//! `trove <path>`, so a crash in a window never takes the service down. D-Bus starts it on
-//! the first call and it exits once idle.
+//! `trove --pick` process and reads its outcome over a pipe, and each request to show files is
+//! a `trove` window of its own (`trove --select <item>...`, `--properties <item>...`, `trove
+//! <folder>...`), so a crash in a window never takes the service down. D-Bus starts it on the
+//! first call and it exits once idle.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -17,7 +18,7 @@ use zbus::object_server::ObjectServer;
 use zbus::zvariant::{DeserializeDict, OwnedObjectPath, SerializeDict, Type};
 use zbus::{connection, interface};
 
-use crate::picker::{Filter, Mode, Outcome, Request};
+use crate::picker::{ChoiceBox, Filter, Mode, Outcome, Request};
 
 pub const PORTAL_NAME: &str = "org.freedesktop.impl.portal.desktop.trove";
 pub const FILE_MANAGER_NAME: &str = "org.freedesktop.FileManager1";
@@ -64,11 +65,16 @@ pub struct Results {
 }
 
 impl Options {
-    fn request(self, mode: Mode, title: String) -> Request {
+    fn request(self, mode: Mode, title: String, parent_window: String) -> Request {
         let filter = |(name, patterns): WireFilter| Filter { name, patterns };
+        let choice = |(id, label, options, initial): WireChoice| ChoiceBox { id, label, options, initial };
         Request {
             mode,
             title,
+            parent_window,
+            // The portal's default: the caller's window waits on the pick.
+            modal: self.modal.unwrap_or(true),
+            choices: self.choices.unwrap_or_default().into_iter().map(choice).collect(),
             accept_label: self.accept_label,
             multiple: mode == Mode::Open && self.multiple.unwrap_or(false),
             directory: mode == Mode::Open && self.directory.unwrap_or(false),
@@ -80,13 +86,13 @@ impl Options {
             files: self.files.unwrap_or_default(),
         }
     }
+}
 
-    /// The choices answered as asked: Trove draws no choice boxes, so each keeps the initial
-    /// value the caller set.
-    fn choices(&self) -> Option<Vec<(String, String)>> {
-        let choices = self.choices.as_ref()?;
-        Some(choices.iter().map(|(id, _, _, initial)| (id.clone(), initial.clone())).collect())
-    }
+/// Whether the picker for `parent_window` runs on the X server `display` names: an X11 window
+/// can only parent a window on its own server, so under Wayland the picker for an XWayland app
+/// runs on XWayland too.
+fn on_x_server(parent_window: &str, display: Option<std::ffi::OsString>) -> bool {
+    parent_window.starts_with("x11:") && display.is_some_and(|d| !d.is_empty())
 }
 
 /// What runs a pick: `program --pick`, the request on its stdin and the outcome on its stdout.
@@ -110,6 +116,9 @@ impl Launcher {
         let Ok(json) = serde_json::to_vec(request) else { return (OTHER, None) };
         let mut cmd = async_process::Command::new(&self.program);
         cmd.arg("--pick").stdin(Stdio::piped()).stdout(Stdio::piped()).kill_on_drop(true);
+        if on_x_server(&request.parent_window, std::env::var_os("DISPLAY")) {
+            cmd.env_remove("WAYLAND_DISPLAY");
+        }
         let mut child = match cmd.spawn() {
             Ok(child) => child,
             Err(e) => {
@@ -152,10 +161,11 @@ impl Launcher {
         }
     }
 
-    /// A Trove window on `path`: a folder opens, a file opens its folder with it selected.
-    fn show(&self, path: &Path, startup_id: &str) {
+    /// A Trove window with `args` (`--select` and items, or folders), handed the caller's
+    /// activation token so the compositor lets it take focus.
+    fn show(&self, args: &[&std::ffi::OsStr], startup_id: &str) {
         let mut cmd = std::process::Command::new(&self.program);
-        cmd.arg(path).stdin(Stdio::null());
+        cmd.args(args).stdin(Stdio::null());
         if !startup_id.is_empty() {
             cmd.env("XDG_ACTIVATION_TOKEN", startup_id).env("DESKTOP_STARTUP_ID", startup_id);
         }
@@ -164,7 +174,18 @@ impl Launcher {
             Ok(mut child) => {
                 let _ = std::thread::Builder::new().name("trove-window".into()).spawn(move || child.wait());
             }
-            Err(e) => eprintln!("trove: opening {}: {e}", path.display()),
+            Err(e) => eprintln!("trove: opening a window: {e}"),
+        }
+    }
+
+    /// A window over the local ones of `uris` behind `flag` (`--select` or `--properties`);
+    /// none when no item is local.
+    fn show_items(&self, flag: &str, uris: &[String], startup_id: &str) {
+        let _busy = self.hold();
+        let items = paths(uris);
+        if !items.is_empty() {
+            let args = std::iter::once(flag.as_ref()).chain(items.iter().map(|p| p.as_os_str()));
+            self.show(&args.collect::<Vec<_>>(), startup_id);
         }
     }
 }
@@ -199,11 +220,11 @@ impl FileChooser {
         handle: OwnedObjectPath,
         mode: Mode,
         title: String,
+        parent_window: String,
         options: Options,
     ) -> (u32, Results) {
         let _busy = self.0.hold();
-        let choices = options.choices();
-        let request = options.request(mode, title);
+        let request = options.request(mode, title, parent_window);
         let (close, closed) = flume::bounded(1);
         if let Err(e) = server.at(&handle, PickRequest { close }).await {
             eprintln!("trove: exporting the request {}: {e}", handle.as_str());
@@ -211,17 +232,16 @@ impl FileChooser {
         }
         let (response, outcome) = self.0.pick(&request, closed).await;
         let _ = server.remove::<PickRequest, _>(&handle).await;
-        let mut results = Results { choices, ..Results::default() };
-        if let Some(Outcome::Picked { uris, filter }) = outcome {
+        let mut results = Results::default();
+        if let Some(Outcome::Picked { uris, filter, choices }) = outcome {
             results.uris = Some(uris);
             results.current_filter = filter.map(|f| (f.name, f.patterns));
+            results.choices = (!request.choices.is_empty()).then_some(choices);
         }
         (response, results)
     }
 }
 
-// `modal` and `parent_window` go unused: a Trove window cannot be made a child of another
-// app's window, so every picker is a window of its own.
 #[interface(name = "org.freedesktop.impl.portal.FileChooser")]
 impl FileChooser {
     #[zbus(out_args("response", "results"))]
@@ -229,12 +249,12 @@ impl FileChooser {
         &self,
         handle: OwnedObjectPath,
         _app_id: String,
-        _parent_window: String,
+        parent_window: String,
         title: String,
         options: Options,
         #[zbus(object_server)] server: &ObjectServer,
     ) -> (u32, Results) {
-        self.run(server, handle, Mode::Open, title, options).await
+        self.run(server, handle, Mode::Open, title, parent_window, options).await
     }
 
     #[zbus(out_args("response", "results"))]
@@ -242,12 +262,12 @@ impl FileChooser {
         &self,
         handle: OwnedObjectPath,
         _app_id: String,
-        _parent_window: String,
+        parent_window: String,
         title: String,
         options: Options,
         #[zbus(object_server)] server: &ObjectServer,
     ) -> (u32, Results) {
-        self.run(server, handle, Mode::Save, title, options).await
+        self.run(server, handle, Mode::Save, title, parent_window, options).await
     }
 
     #[zbus(out_args("response", "results"))]
@@ -255,51 +275,40 @@ impl FileChooser {
         &self,
         handle: OwnedObjectPath,
         _app_id: String,
-        _parent_window: String,
+        parent_window: String,
         title: String,
         options: Options,
         #[zbus(object_server)] server: &ObjectServer,
     ) -> (u32, Results) {
-        self.run(server, handle, Mode::SaveFiles, title, options).await
+        self.run(server, handle, Mode::SaveFiles, title, parent_window, options).await
     }
 }
 
 struct FileManager(Launcher);
 
-/// The windows a `ShowItems` call opens: one per folder, on the first of its items there.
-/// URIs that are not `file://` are skipped.
-pub fn item_windows(uris: &[String]) -> Vec<PathBuf> {
-    let mut folders: Vec<PathBuf> = Vec::new();
-    let mut shown = Vec::new();
-    for path in uris.iter().filter_map(|u| trove_fs::uri_path(u)) {
-        let folder = path.parent().map(Path::to_path_buf).unwrap_or_else(|| path.clone());
-        if !folders.contains(&folder) {
-            folders.push(folder);
-            shown.push(path);
-        }
-    }
-    shown
+/// The local paths of `uris`; ones that are not `file://` are skipped.
+fn paths(uris: &[String]) -> Vec<PathBuf> {
+    uris.iter().filter_map(|u| trove_fs::uri_path(u)).collect()
 }
 
+/// One window for a whole request: a tab per folder, each with its items selected.
 #[interface(name = "org.freedesktop.FileManager1")]
 impl FileManager {
     fn show_folders(&self, uris: Vec<String>, startup_id: String) {
         let _busy = self.0.hold();
-        for path in uris.iter().filter_map(|u| trove_fs::uri_path(u)) {
-            self.0.show(&path, &startup_id);
+        let folders = paths(&uris);
+        if !folders.is_empty() {
+            self.0.show(&folders.iter().map(|p| p.as_os_str()).collect::<Vec<_>>(), &startup_id);
         }
     }
 
     fn show_items(&self, uris: Vec<String>, startup_id: String) {
-        let _busy = self.0.hold();
-        for path in item_windows(&uris) {
-            self.0.show(&path, &startup_id);
-        }
+        self.0.show_items("--select", &uris, &startup_id);
     }
 
-    /// Trove has no properties window; the item is shown selected, its details in the preview.
+    /// The items shown as `ShowItems` does, with the Properties sheet over them.
     fn show_item_properties(&self, uris: Vec<String>, startup_id: String) {
-        self.show_items(uris, startup_id);
+        self.0.show_items("--properties", &uris, &startup_id);
     }
 }
 
@@ -358,4 +367,16 @@ pub fn run() -> zbus::Result<()> {
         service.until_idle(IDLE).await;
         Ok(())
     })
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn an_x11_parent_puts_the_picker_on_its_x_server() {
+        let display = || Some(":1".into());
+        assert!(super::on_x_server("x11:3a00004", display()));
+        assert!(!super::on_x_server("x11:3a00004", None), "no X server to go to");
+        assert!(!super::on_x_server("wayland:5f1e", display()));
+        assert!(!super::on_x_server("", display()));
+    }
 }

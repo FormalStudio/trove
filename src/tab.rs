@@ -116,6 +116,8 @@ pub struct Tab {
     /// Selected and scrolled to as soon as the listing has it: the folder just left on the way
     /// up, or the file named on the command line.
     reveal: Option<EntryId>,
+    /// Items "Show in folder" named: selected once the folder has listed its names.
+    show_items: Vec<EntryId>,
     width: f32,
     /// The shown folders, which take drops on their rows.
     folders: Rc<IdSet>,
@@ -206,6 +208,7 @@ impl Tab {
             typed_at: f64::NEG_INFINITY,
             cursor: None,
             reveal: None,
+            show_items: Vec::new(),
             width: DEFAULT_WIDTH,
             folders: Rc::default(),
             maybe_file: false,
@@ -363,6 +366,13 @@ impl Tab {
         self.apply_reveal(cx);
     }
 
+    /// Selects `items` of this tab's folder once it has listed, the first scrolled to: "Show in
+    /// folder" with several files.
+    pub fn reveal_items(&mut self, items: &[PathBuf], cx: &mut Context<Self>) {
+        self.show_items = items.iter().filter_map(|p| p.file_name()).map(EntryId::of).collect();
+        self.apply_reveal(cx);
+    }
+
     pub fn go_back(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(to) = self.back.pop() else { return };
         let from = std::mem::replace(&mut self.location, to.clone());
@@ -409,6 +419,7 @@ impl Tab {
         self.typed.clear();
         self.renaming = None;
         self.pending = None;
+        self.show_items.clear();
         self.trash_info.clear();
         self.trash_asked.clear();
         self.in_trash = location.dir().is_some_and(|d| trash::is_trash_files(d, &self.trash));
@@ -679,6 +690,17 @@ impl Tab {
     }
 
     fn apply_reveal(&mut self, cx: &mut Context<Self>) {
+        if !self.show_items.is_empty() && matches!(self.load, Load::Listed | Load::Complete) {
+            let ids: Vec<EntryId> =
+                std::mem::take(&mut self.show_items).into_iter().filter(|id| self.visible.contains(id)).collect();
+            if let Some(&first) = ids.first() {
+                self.cursor = Some(first);
+                let state = self.list_state_mut();
+                state.set_selected(ids, cx);
+                state.scroll_to(first, Align::Nearest, px(0.), cx);
+                cx.notify();
+            }
+        }
         let Some(id) = self.reveal else { return };
         if !self.visible.contains(&id) {
             return;

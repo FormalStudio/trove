@@ -3,8 +3,8 @@
 //! portal (`portal.rs`) runs one such process per request.
 //!
 //! The window is the usual [`Root`](crate::Root) with a [`Picker`] bar under the listing: the
-//! name field when saving, the filter, Cancel and the accept button. Activating a file accepts,
-//! Escape cancels.
+//! caller's extra choices, the name field when saving, the filter, Cancel and the accept button.
+//! Activating a file accepts, Escape cancels. It opens over the caller's window, modal to it.
 
 use std::ffi::OsString;
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
@@ -40,12 +40,46 @@ pub struct Filter {
     pub patterns: Vec<(u32, String)>,
 }
 
+/// One of the caller's extra choices: a dropdown over `options` (id and label each), or a
+/// checkbox when there are none, whose value is `"true"` or `"false"`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChoiceBox {
+    pub id: String,
+    pub label: String,
+    pub options: Vec<(String, String)>,
+    pub initial: String,
+}
+
+impl ChoiceBox {
+    pub fn is_checkbox(&self) -> bool {
+        self.options.is_empty()
+    }
+
+    /// The value it starts on: the caller's when it names an option (or a checkbox state),
+    /// else the first option, or unchecked.
+    pub fn start_value(&self) -> String {
+        if self.is_checkbox() {
+            return if self.initial == "true" { "true" } else { "false" }.to_owned();
+        }
+        match self.options.iter().find(|(id, _)| *id == self.initial) {
+            Some((id, _)) => id.clone(),
+            None => self.options[0].0.clone(),
+        }
+    }
+}
+
 /// What the caller asked for. Paths and names are the portal's byte strings, nul included.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Request {
     pub mode: Mode,
     pub title: String,
+    /// The caller's window as the portal names it (`wayland:<handle>` or `x11:<xid>`, empty for
+    /// none): the picker opens over it.
+    pub parent_window: String,
+    /// The caller's window takes no input while the picker is open.
+    pub modal: bool,
+    pub choices: Vec<ChoiceBox>,
     pub accept_label: Option<String>,
     pub multiple: bool,
     pub directory: bool,
@@ -61,7 +95,13 @@ pub struct Request {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "outcome", rename_all = "kebab-case")]
 pub enum Outcome {
-    Picked { uris: Vec<String>, filter: Option<Filter> },
+    Picked {
+        uris: Vec<String>,
+        filter: Option<Filter>,
+        /// Each choice's id and the value the user left it on.
+        #[serde(default)]
+        choices: Vec<(String, String)>,
+    },
     Cancelled,
 }
 
@@ -130,8 +170,15 @@ impl Request {
         file.and_then(|f| f.file_name().map(|n| n.to_string_lossy().into_owned())).unwrap_or_default()
     }
 
+    /// The names `SaveFiles` writes, each cut to its last component: a name is never a path
+    /// out of the folder the user chose.
     pub fn names(&self) -> Vec<PathBuf> {
-        self.files.iter().filter_map(|n| bytes_path(n)).collect()
+        self.files.iter().filter_map(|n| bytes_path(n)?.file_name().map(PathBuf::from)).collect()
+    }
+
+    /// The window the picker opens over, when the portal named one.
+    pub fn parent(&self) -> Option<ForeignParent> {
+        ForeignParent::from_portal(&self.parent_window)
     }
 }
 
@@ -231,6 +278,13 @@ pub struct Choice {
 pub enum Decision {
     /// Go into this folder instead of accepting.
     Enter(PathBuf),
+    /// A save name typed as a path: go into its folder with the name left in the field.
+    Go {
+        dir: PathBuf,
+        name: String,
+    },
+    /// Say why nothing is accepted.
+    Refuse(String),
     Accept(Vec<PathBuf>),
     /// Accept once the user agrees to replace what exists.
     Replace {
@@ -269,6 +323,13 @@ pub fn decide(request: &Request, choice: &Choice, listed: impl Fn(&Path) -> Opti
         Mode::Save => {
             let name = choice.name.trim();
             let Some(dir) = choice.dir.as_ref() else { return Decision::Nothing };
+            if let Some((folder, last)) = name.rsplit_once('/') {
+                let folder = resolve(dir, if folder.is_empty() { "/" } else { folder });
+                return match last {
+                    "" | "." | ".." => Decision::Go { dir: resolve(&folder, last), name: String::new() },
+                    _ => Decision::Go { dir: folder, name: last.to_owned() },
+                };
+            }
             if name.is_empty() || name == "." || name == ".." {
                 return target_folder.map_or(Decision::Nothing, Decision::Enter);
             }
@@ -288,6 +349,10 @@ pub fn decide(request: &Request, choice: &Choice, listed: impl Fn(&Path) -> Opti
             }
             let Some(dir) = choice.dir.as_ref() else { return Decision::Nothing };
             let paths: Vec<PathBuf> = request.names().iter().map(|n| dir.join(n)).collect();
+            if let Some(folder) = paths.iter().find(|p| listed(p) == Some(true)) {
+                let name = folder.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                return Decision::Refuse(format!("\u{201c}{name}\u{201d} is a folder here. Choose another folder."));
+            }
             let existing = paths.iter().filter(|p| listed(p).is_some()).count();
             if existing == 0 {
                 return Decision::Accept(paths);
@@ -301,6 +366,30 @@ pub fn decide(request: &Request, choice: &Choice, listed: impl Fn(&Path) -> Opti
     }
 }
 
+/// `typed` against the folder shown, as a save name typed as a path is: `~` is home, `.` and
+/// `..` step without asking the disk.
+pub fn resolve(dir: &Path, typed: &str) -> PathBuf {
+    let home = &crate::env::get().home;
+    let (mut out, rest) = match typed {
+        "~" => (home.clone(), ""),
+        _ => match typed.strip_prefix("~/") {
+            Some(rest) => (home.clone(), rest),
+            None => (dir.to_path_buf(), typed),
+        },
+    };
+    for part in Path::new(rest).components() {
+        match part {
+            std::path::Component::RootDir => out = PathBuf::from("/"),
+            std::path::Component::ParentDir => {
+                out.pop();
+            }
+            std::path::Component::Normal(p) => out.push(p),
+            std::path::Component::CurDir | std::path::Component::Prefix(_) => {}
+        }
+    }
+    out
+}
+
 /// Where the outcome goes: stdout for `trove --pick`, a test's record otherwise.
 pub type Done = Box<dyn FnOnce(Outcome, &mut App)>;
 
@@ -309,6 +398,8 @@ pub struct Picker {
     request: Request,
     filters: Vec<Filter>,
     filter: usize,
+    /// The value of each of the request's choices, in its order.
+    choices: Vec<String>,
     name: SharedString,
     /// The file whose name the field took last, so a re-render of the same selection leaves a
     /// typed name alone.
@@ -320,7 +411,8 @@ impl Picker {
     pub fn new(request: Request, done: Done) -> Self {
         let (filters, filter) = request.filter_list();
         let name = request.start_name().into();
-        Self { request, filters, filter, name, named_from: None, done: Some(done) }
+        let choices = request.choices.iter().map(ChoiceBox::start_value).collect();
+        Self { request, filters, filter, choices, name, named_from: None, done: Some(done) }
     }
 
     pub fn request(&self) -> &Request {
@@ -362,6 +454,27 @@ impl Picker {
         }
     }
 
+    /// Each choice's id and value, as the pick answers them.
+    pub fn choices(&self) -> Vec<(String, String)> {
+        self.request.choices.iter().zip(&self.choices).map(|(c, v)| (c.id.clone(), v.clone())).collect()
+    }
+
+    /// Sets the choice with `id` to `value`, which must be one of its options (or a checkbox
+    /// state).
+    pub fn set_choice(&mut self, id: &str, value: &str, cx: &mut Context<Self>) {
+        let Some(at) = self.request.choices.iter().position(|c| c.id == id) else { return };
+        let choice = &self.request.choices[at];
+        let valid = if choice.is_checkbox() {
+            value == "true" || value == "false"
+        } else {
+            choice.options.iter().any(|(o, _)| o == value)
+        };
+        if valid && self.choices[at] != value {
+            self.choices[at] = value.to_owned();
+            cx.notify();
+        }
+    }
+
     /// What the tabs list under the current filter.
     pub fn shown(&self) -> Shown {
         Shown {
@@ -381,7 +494,11 @@ impl Picker {
     }
 
     pub fn picked(&self, paths: &[PathBuf]) -> Outcome {
-        Outcome::Picked { uris: paths.iter().map(|p| trove_fs::file_uri(p)).collect(), filter: self.filter().cloned() }
+        Outcome::Picked {
+            uris: paths.iter().map(|p| trove_fs::file_uri(p)).collect(),
+            filter: self.filter().cloned(),
+            choices: self.choices(),
+        }
     }
 }
 
@@ -428,7 +545,24 @@ impl Render for Picker {
                 })
         });
         let spacer = name.is_none().then(|| div().flex_1());
-        v_flex().w_full().child(separator()).child(
+        let choices = (!self.request.choices.is_empty()).then(|| {
+            h_flex()
+                .id("pick-choices")
+                .w_full()
+                .flex_wrap()
+                .px(theme.spacing.md)
+                .pt(theme.spacing.sm)
+                .gap(theme.spacing.md)
+                .items_center()
+                .children(
+                    self.request
+                        .choices
+                        .iter()
+                        .zip(&self.choices)
+                        .map(|(c, value)| choice_control(c, value, &me, theme.spacing.sm, theme.text.secondary)),
+                )
+        });
+        v_flex().w_full().child(separator()).children(choices).child(
             h_flex()
                 .id("pick-bar")
                 .w_full()
@@ -443,6 +577,39 @@ impl Render for Picker {
                 .child(button("pick-accept", self.request.accept_label()).primary().dispatch(PickAccept)),
         )
     }
+}
+
+/// A choice as the caller drew it in GTK's chooser: a checkbox, or its label beside a dropdown.
+fn choice_control(choice: &ChoiceBox, value: &str, me: &WeakEntity<Picker>, gap: Pixels, label: Hsla) -> AnyElement {
+    let test_id = SharedString::from(format!("pick-choice-{}", choice.id));
+    let id = choice.id.clone();
+    let me = me.clone();
+    if choice.is_checkbox() {
+        return checkbox(test_id, choice.label.clone())
+            .checked(value == "true")
+            .on_toggle(move |e: &Toggled, _, cx| {
+                let value = if e.checked { "true" } else { "false" };
+                let _ = me.update(cx, |p, cx| p.set_choice(&id, value, cx));
+            })
+            .into_any_element();
+    }
+    let at = choice.options.iter().position(|(o, _)| o == value).unwrap_or(0);
+    let options: Vec<String> = choice.options.iter().map(|(o, _)| o.clone()).collect();
+    h_flex()
+        .gap(gap)
+        .items_center()
+        .child(text(choice.label.clone()).text_color(label))
+        .child(
+            select(test_id, choice.options.iter().map(|(_, label)| label.clone()))
+                .label(choice.label.clone())
+                .selected(at)
+                .on_change(move |e: &SelectChanged, _, cx| {
+                    if let Some(option) = options.get(e.index) {
+                        let _ = me.update(cx, |p, cx| p.set_choice(&id, option, cx));
+                    }
+                }),
+        )
+        .into_any_element()
 }
 
 /// The last folder a pick ended in, for the next pick with no folder of its own.

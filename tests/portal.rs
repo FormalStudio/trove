@@ -77,6 +77,16 @@ async fn call(
     handle: &str,
     options: HashMap<&str, Value<'_>>,
 ) -> zbus::Result<(u32, Results)> {
+    call_over(conn, method, handle, "", options).await
+}
+
+async fn call_over(
+    conn: &zbus::Connection,
+    method: &str,
+    handle: &str,
+    parent_window: &str,
+    options: HashMap<&str, Value<'_>>,
+) -> zbus::Result<(u32, Results)> {
     let handle = ObjectPath::try_from(handle)?;
     let reply = conn
         .call_method(
@@ -84,14 +94,13 @@ async fn call(
             PORTAL_PATH,
             Some(CHOOSER),
             method,
-            &(handle, "org.example.App", "", "Pick", options),
+            &(handle, "org.example.App", parent_window, "Pick", options),
         )
         .await?;
     reply.body().deserialize::<(u32, Results)>()
 }
 
-const PICKED: &str =
-    r#"{"outcome":"picked","uris":["file:///tmp/a%20b.txt"],"filter":{"name":"Text","patterns":[[0,"*.txt"]]}}"#;
+const PICKED: &str = r#"{"outcome":"picked","uris":["file:///tmp/a%20b.txt"],"filter":{"name":"Text","patterns":[[0,"*.txt"]]},"choices":[["encoding","latin1"]]}"#;
 
 #[test]
 fn open_file_hands_the_request_over_and_answers_the_pick() {
@@ -102,7 +111,7 @@ fn open_file_hands_the_request_over_and_answers_the_pick() {
     let conn = client(&bus);
 
     let filters = vec![("Text", vec![(0u32, "*.txt")]), ("Images", vec![(1u32, "image/*")])];
-    let choices = vec![("encoding", "Encoding", vec![("utf8", "UTF-8")], "utf8")];
+    let choices = vec![("encoding", "Encoding", vec![("utf8", "UTF-8"), ("latin1", "Latin-1")], "utf8")];
     let options = HashMap::from([
         ("multiple", Value::from(true)),
         ("accept_label", Value::from("_Upload")),
@@ -110,13 +119,13 @@ fn open_file_hands_the_request_over_and_answers_the_pick() {
         ("choices", Value::from(choices)),
         ("current_folder", Value::from(b"/tmp\0".as_slice())),
     ]);
+    let handle = "/org/freedesktop/portal/desktop/request/1_1/t1";
     let (response, results) =
-        async_io::block_on(call(&conn, "OpenFile", "/org/freedesktop/portal/desktop/request/1_1/t1", options))
-            .expect("OpenFile answers");
+        async_io::block_on(call_over(&conn, "OpenFile", handle, "wayland:5f1e", options)).expect("OpenFile answers");
     assert_eq!(response, 0);
     assert_eq!(results.uris, Some(vec!["file:///tmp/a%20b.txt".to_owned()]));
     assert_eq!(results.current_filter, Some(("Text".to_owned(), vec![(0, "*.txt".to_owned())])));
-    assert_eq!(results.choices, Some(vec![("encoding".to_owned(), "utf8".to_owned())]), "choices come back as set");
+    assert_eq!(results.choices, Some(vec![("encoding".to_owned(), "latin1".to_owned())]), "choices come back as set");
 
     let sent: Request =
         serde_json::from_slice(&std::fs::read(dir.path().join("request.json")).expect("the stub got a request"))
@@ -126,6 +135,9 @@ fn open_file_hands_the_request_over_and_answers_the_pick() {
     assert_eq!(sent.accept_label(), "Upload");
     assert_eq!(sent.filters.len(), 2);
     assert_eq!(sent.current_folder.as_deref(), Some(b"/tmp\0".as_slice()));
+    assert_eq!((sent.parent_window.as_str(), sent.modal), ("wayland:5f1e", true), "over the caller, modal by default");
+    assert_eq!(sent.choices.len(), 1);
+    assert_eq!((sent.choices[0].options.len(), sent.choices[0].initial.as_str()), (2, "utf8"));
 }
 
 #[test]
@@ -134,14 +146,14 @@ fn save_file_answers_cancelled_and_failed_picks() {
     let dir = tempfile::tempdir().expect("a temp dir");
     let _service = serve(&bus, stub(dir.path(), "cat > \"$DIR/request.json\"\necho '{\"outcome\":\"cancelled\"}'"));
     let conn = client(&bus);
-    let options = HashMap::from([("current_name", Value::from("notes.txt"))]);
+    let options = HashMap::from([("current_name", Value::from("notes.txt")), ("modal", Value::from(false))]);
     let (response, results) =
         async_io::block_on(call(&conn, "SaveFile", "/org/freedesktop/portal/desktop/request/1_1/t2", options))
             .expect("SaveFile answers");
     assert_eq!((response, results.uris), (1, None));
     let sent: Request =
         serde_json::from_slice(&std::fs::read(dir.path().join("request.json")).expect("a request")).expect("a request");
-    assert_eq!((sent.mode, sent.current_name.as_deref()), (Mode::Save, Some("notes.txt")));
+    assert_eq!((sent.mode, sent.current_name.as_deref(), sent.modal), (Mode::Save, Some("notes.txt"), false));
 
     let bus = Bus::start();
     let _service = serve(&bus, stub(dir.path(), "cat > /dev/null\nexit 3"));
@@ -180,10 +192,11 @@ fn close_on_the_request_ends_the_picker() {
 }
 
 #[test]
-fn file_manager_opens_one_window_per_folder() {
+fn file_manager_opens_one_window_per_request() {
     let bus = Bus::start();
     let dir = tempfile::tempdir().expect("a temp dir");
-    let _service = serve(&bus, stub(dir.path(), "echo \"$1 $XDG_ACTIVATION_TOKEN\" >> \"$DIR/shown\""));
+    let body = "printf '%s|' \"$@\" \"$XDG_ACTIVATION_TOKEN\" >> \"$DIR/shown\"\necho >> \"$DIR/shown\"";
+    let _service = serve(&bus, stub(dir.path(), body));
     let conn = client(&bus);
     let call = |method: &str, uris: &[&str]| {
         let uris: Vec<&str> = uris.to_vec();
@@ -200,16 +213,21 @@ fn file_manager_opens_one_window_per_folder() {
         "ShowItems",
         &["file:///srv/a%20b/one.txt", "file:///srv/a%20b/two.txt", "https://example.com/x", "file:///opt/three"],
     );
-    call("ShowFolders", &["file:///home"]);
+    call("ShowFolders", &["file:///home", "file:///srv"]);
+    call("ShowItems", &["https://example.com/only"]);
+    call("ShowItemProperties", &["file:///srv/a%20b/one.txt"]);
     let shown = dir.path().join("shown");
     let lines = || std::fs::read_to_string(&shown).unwrap_or_default().lines().map(str::to_owned).collect::<Vec<_>>();
     async_io::block_on(until(|| lines().len() >= 3));
     let mut got = lines();
     got.sort();
-    assert_eq!(got, ["/home token-1", "/opt/three token-1", "/srv/a b/one.txt token-1"]);
-
     assert_eq!(
-        trove::portal::item_windows(&["file:///x/1".into(), "file:///x/2".into(), "file:///y/3".into()]),
-        [PathBuf::from("/x/1"), PathBuf::from("/y/3")]
+        got,
+        [
+            "--properties|/srv/a b/one.txt|token-1|",
+            "--select|/srv/a b/one.txt|/srv/a b/two.txt|/opt/three|token-1|",
+            "/home|/srv|token-1|"
+        ],
+        "every item in one window, the remote one left out; a request with nothing local opens none"
     );
 }

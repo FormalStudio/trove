@@ -380,6 +380,58 @@ fn ctrl_f_focuses_the_search_field() {
     assert!(field.focused, "{}", h.cx.semantic_tree().snapshot());
 }
 
+/// "Show in folder" with files in two folders: one window, a tab per folder, each with its own
+/// files selected; plain paths open a tab each.
+#[test]
+fn show_items_opens_a_tab_per_folder_with_its_items_selected() {
+    let start = |args: Vec<std::ffi::OsString>| {
+        let mut cx = TestApp::new();
+        let window = cx.open_window(Size { width: 1200., height: 800. }, move |window, cx| {
+            trove::init(cx);
+            trove::demo_root();
+            cx.new(|cx| Root::new(trove::start_from(args).0, window, cx))
+        });
+        let mut h = Harness { cx, window };
+        h.settle();
+        h
+    };
+    let arg = |rel: &str| Harness::demo(rel).into_os_string();
+    let h = start(vec![
+        "--select".into(),
+        arg("Documents/chapter2.md"),
+        arg("Pictures/sunset.jpg"),
+        arg("Documents/chapter10.md"),
+        arg("Documents"),
+    ]);
+    let tabs: Vec<_> = h
+        .root()
+        .read(&h.cx)
+        .tabs()
+        .iter()
+        .map(|t| (t.read(&h.cx).location().clone(), t.read(&h.cx).selected_names()))
+        .collect();
+    assert_eq!(
+        tabs,
+        [
+            (Location::Dir(Harness::demo("Documents")), vec!["chapter2.md".to_owned(), "chapter10.md".to_owned()]),
+            (Location::Dir(Harness::demo("Pictures")), vec!["sunset.jpg".to_owned()]),
+            (Location::Dir(Harness::demo("")), vec!["Documents".to_owned()]),
+        ],
+        "a folder named as an item shows in its parent, selected"
+    );
+    assert_eq!(h.root().read(&h.cx).active_index(), 0);
+
+    let (shown, properties) =
+        trove::start_from(vec!["--properties".into(), arg("Documents/chapter2.md"), arg("Pictures")]);
+    let (selected, none) = trove::start_from(vec!["--select".into(), arg("Documents/chapter2.md"), arg("Pictures")]);
+    assert_eq!(shown, selected, "properties shows the items as show in folder does");
+    assert_eq!((properties, none), (vec![Harness::demo("Documents/chapter2.md"), Harness::demo("Pictures")], vec![]));
+
+    let h = start(vec![arg("Music"), arg("Pictures")]);
+    let locations: Vec<_> = h.root().read(&h.cx).tabs().iter().map(|t| t.read(&h.cx).location().clone()).collect();
+    assert_eq!(locations, [Location::Dir(Harness::demo("Music")), Location::Dir(Harness::demo("Pictures"))]);
+}
+
 // Picker mode: the window another app's file chooser opens.
 
 mod picking {
@@ -389,7 +441,7 @@ mod picking {
     use nd::chrome::services::{AlertCallback, Chrome, ChromeServices, OpenCallback, SaveCallback};
     use nd::chrome::{Alert, AlertResponse, ContextMenu, Menu, OpenDialog, SaveDialog};
     use nd::core::{NodeId, WindowId};
-    use trove::picker::{Filter, Mode, Outcome, PickAccept, PickCancel, Request};
+    use trove::picker::{ChoiceBox, Filter, Mode, Outcome, PickAccept, PickCancel, Request};
 
     use super::*;
 
@@ -469,6 +521,124 @@ mod picking {
             let picker = root.read(&self.h.cx).picker().unwrap_or_else(|| panic!("a picker")).clone();
             picker.read(&self.h.cx).name().to_owned()
         }
+
+        /// Types `name` into the name field, as its change event reports it.
+        fn type_name(&mut self, name: &str) {
+            let picker = self.h.root().read(&self.h.cx).picker().unwrap_or_else(|| panic!("a picker")).clone();
+            picker.update(&mut self.h.cx, |p, cx| p.set_name(name.to_owned(), cx));
+            self.h.settle();
+        }
+
+        fn emit(&mut self, test_id: &str, event: impl std::any::Any) {
+            let id = self.h.window.id();
+            let node = nd::test::by_test_id(&mut self.h.cx, id, test_id)
+                .unwrap_or_else(|| panic!("no `{test_id}` in\n{}", self.h.cx.semantic_tree().snapshot()))
+                .id;
+            self.h.cx.emit(node, event);
+            self.h.settle();
+        }
+
+        fn answer_alert(&mut self, button: usize) {
+            let done = self.alerts.pending.borrow_mut().remove(0);
+            done(AlertResponse(button), &mut self.h.cx);
+            self.h.settle();
+        }
+    }
+
+    fn choice(id: &str, options: &[&str], initial: &str) -> ChoiceBox {
+        ChoiceBox {
+            id: id.into(),
+            label: format!("{id} label"),
+            options: options.iter().map(|o| ((*o).to_owned(), o.to_uppercase())).collect(),
+            initial: initial.into(),
+        }
+    }
+
+    #[test]
+    fn the_callers_choices_show_in_the_bar_and_go_back_as_set() {
+        let request = Request {
+            current_folder: folder("Documents"),
+            choices: vec![
+                choice("encoding", &["utf8", "latin1"], "latin1"),
+                choice("bom", &[], "true"),
+                choice("eol", &["lf", "crlf"], "missing"),
+            ],
+            ..Request::default()
+        };
+        let mut p = Picking::new(request);
+        let tree = p.h.cx.semantic_tree().snapshot();
+        for id in ["pick-choice-encoding", "pick-choice-bom", "pick-choice-eol"] {
+            assert!(tree.contains(id), "{id} in\n{tree}");
+        }
+        p.emit("pick-choice-encoding", SelectChanged { index: 0 });
+        p.emit("pick-choice-bom", Toggled { checked: false });
+        p.h.pick("files-table", &["chapter1.md"], Some("chapter1.md"));
+        p.h.act(PickAccept);
+        let outcome = p.outcome();
+        let [Outcome::Picked { choices, .. }] = outcome.as_slice() else { panic!("{outcome:?}") };
+        let want = [("encoding", "utf8"), ("bom", "false"), ("eol", "lf")];
+        assert_eq!(choices, &want.map(|(i, v)| (i.to_owned(), v.to_owned())), "an unknown default starts on the first");
+    }
+
+    #[test]
+    fn a_save_name_typed_as_a_path_goes_to_its_folder_and_still_asks_before_replacing() {
+        let request = Request { mode: Mode::Save, current_folder: folder("Documents"), ..Request::default() };
+        let mut p = Picking::new(request.clone());
+        p.type_name("Taxes 2025/Return.pdf");
+        p.h.act(PickAccept);
+        assert_eq!(p.h.location(), Location::Dir(Harness::demo("Documents/Taxes 2025")));
+        assert_eq!((p.name().as_str(), p.outcome().len()), ("Return.pdf", 0), "the name stays, nothing is saved yet");
+        p.h.act(PickAccept);
+        assert_eq!(p.alerts.shown.borrow().as_slice(), ["\u{201c}Return.pdf\u{201d} already exists. Replace it?"]);
+        p.answer_alert(0);
+        assert_eq!(p.picked(), [uri("Documents/Taxes 2025/Return.pdf")]);
+
+        let mut p = Picking::new(request.clone());
+        p.type_name("../todo.txt");
+        p.h.act(PickAccept);
+        p.h.act(PickAccept);
+        assert_eq!(p.h.location(), Location::Dir(Harness::demo("")));
+        assert_eq!(p.alerts.shown.borrow().len(), 1, "a parent folder's file asks too");
+        p.answer_alert(1);
+        assert!(p.outcome().is_empty());
+
+        let mut p = Picking::new(request);
+        p.type_name("~/Pictures/new.png");
+        p.h.act(PickAccept);
+        p.h.act(PickAccept);
+        assert_eq!(p.picked(), [uri("Pictures/new.png")], "~ is home");
+
+        let mut p = Picking::new(Request { mode: Mode::Save, current_folder: folder(""), ..Request::default() });
+        p.type_name("Documents/");
+        p.h.act(PickAccept);
+        assert_eq!((p.h.location(), p.name()), (Location::Dir(Harness::demo("Documents")), String::new()));
+    }
+
+    #[test]
+    fn save_files_writes_names_only_into_the_folder_and_never_over_a_folder() {
+        let request = Request {
+            mode: Mode::SaveFiles,
+            current_folder: folder("Documents"),
+            files: vec![b"../escape.txt\0".to_vec(), b"/etc/x.txt\0".to_vec()],
+            ..Request::default()
+        };
+        let mut p = Picking::new(request);
+        p.h.act(PickAccept);
+        assert_eq!(p.picked(), [uri("Documents/escape.txt"), uri("Documents/x.txt")]);
+
+        let request = Request {
+            mode: Mode::SaveFiles,
+            current_folder: folder("Documents"),
+            files: vec![b"Taxes 2025\0".to_vec()],
+            ..Request::default()
+        };
+        let mut p = Picking::new(request);
+        p.h.act(PickAccept);
+        assert!(p.outcome().is_empty());
+        assert_eq!(
+            p.alerts.shown.borrow().as_slice(),
+            ["\u{201c}Taxes 2025\u{201d} is a folder here. Choose another folder."]
+        );
     }
 
     #[test]

@@ -44,7 +44,7 @@ use std::time::Duration;
 use nd::prelude::*;
 
 pub use location::Location;
-pub use root::{Root, Start};
+pub use root::{Place, Root, Start};
 pub use tab::{Load, RENAME_FIELD, Rename, Tab, View, row_id, stem_chars};
 pub use trash::TrashInfo;
 
@@ -92,10 +92,16 @@ pub fn open_picker(
     done: impl FnOnce(picker::Outcome, &mut App) + 'static,
 ) -> WindowHandle<Root> {
     init(cx);
-    let options = WindowOptions::main("picker")
+    let mut options = WindowOptions::main("picker")
         .title(request.window_title())
         .size(size(px(960.), px(620.)))
         .min_size(size(px(640.), px(400.)));
+    if let Some(parent) = request.parent() {
+        options = options.child_of(parent);
+        if request.modal {
+            options = options.modal();
+        }
+    }
     let done: picker::Done = Box::new(done);
     let window = cx.open_window(options, move |window, cx| cx.new(|cx| Root::picking(request, done, window, cx)));
     focus_listing(window.clone(), 30);
@@ -239,6 +245,51 @@ fn arg_path(arg: std::ffi::OsString) -> PathBuf {
     PathBuf::from(std::ffi::OsString::from_vec(out))
 }
 
+/// "Show in folder" for `items`: a tab for each folder they are in, in the order the first of
+/// each comes, with that folder's items selected.
+pub fn items_by_folder(items: Vec<PathBuf>) -> Vec<Place> {
+    let mut places: Vec<Place> = Vec::new();
+    for item in items {
+        let Some(folder) = item.parent().filter(|_| item.file_name().is_some()) else {
+            places.push(Place::Path(item));
+            continue;
+        };
+        let found = places.iter_mut().find_map(|p| match p {
+            Place::Items { folder: f, items } if f == folder => Some(items),
+            _ => None,
+        });
+        match found {
+            Some(items) => {
+                if !items.contains(&item) {
+                    items.push(item);
+                }
+            }
+            None => places.push(Place::Items { folder: folder.to_path_buf(), items: vec![item] }),
+        }
+    }
+    places
+}
+
+/// Where a launch starts, and the items to open the Properties sheet on over it: `trove
+/// --select <item>...` shows items in their folders, `trove --properties <item>...` too with
+/// the sheet over them, `trove <path>...` opens a tab on each, nothing reopens the last session.
+pub fn start_from(args: Vec<std::ffi::OsString>) -> (Start, Vec<PathBuf>) {
+    let flag = args.first().and_then(|a| a.to_str()).filter(|a| matches!(*a, "--select" | "--properties"));
+    let (items, properties) = (flag.is_some(), flag == Some("--properties"));
+    let paths: Vec<PathBuf> = args
+        .into_iter()
+        .skip(usize::from(items))
+        .map(|a| std::path::absolute(arg_path(a)).unwrap_or_default())
+        .collect();
+    let start = match (items, paths.len()) {
+        (_, 0) => Start::Home,
+        (true, _) => Start::Places(items_by_folder(paths.clone())),
+        (false, 1) => paths.first().cloned().map_or(Start::Home, Start::Path),
+        (false, _) => Start::Places(paths.iter().cloned().map(Place::Path).collect()),
+    };
+    (start, if properties { paths } else { Vec::new() })
+}
+
 pub fn run() -> nd::Result<()> {
     match std::env::args_os().nth(1).as_deref().and_then(|a| a.to_str()) {
         Some("--pick") => return run_picker(),
@@ -253,12 +304,12 @@ pub fn run() -> nd::Result<()> {
     }
     trace::init();
     pump::set_live();
-    let start = match std::env::args_os().nth(1) {
-        Some(arg) => Start::Path(std::path::absolute(arg_path(arg)).unwrap_or_default()),
-        None => Start::Home,
-    };
+    let (start, properties) = start_from(std::env::args_os().skip(1).collect());
     app().run(move |cx| {
-        open(cx, start.clone());
+        let window = open(cx, start.clone());
+        if !properties.is_empty() {
+            properties::open(cx, window.id(), properties.clone());
+        }
     })
 }
 
