@@ -78,6 +78,19 @@ pub fn user_dirs() -> Vec<Place> {
     parse_user_dirs(&text, &home())
 }
 
+/// The templates folder, `None` when the user disabled it.
+pub fn templates_dir() -> Option<PathBuf> {
+    let text = fs::read_to_string(config_home().join("user-dirs.dirs")).unwrap_or_default();
+    parse_templates_dir(&text, &home())
+}
+
+/// `XDG_TEMPLATES_DIR` from a `user-dirs.dirs` text, `~/Templates` when unset. xdg-user-dirs
+/// points a disabled directory at `$HOME`, which reads as no folder.
+pub fn parse_templates_dir(text: &str, home: &Path) -> Option<PathBuf> {
+    let path = user_dir_value(text, "XDG_TEMPLATES_DIR", home).unwrap_or_else(|| home.join("Templates"));
+    (path != home).then_some(path)
+}
+
 pub fn bookmarks() -> Vec<Place> {
     read_bookmarks(&bookmarks_file())
 }

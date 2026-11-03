@@ -1414,7 +1414,7 @@ impl Render for Tab {
             })
             .context_menu(move |m, window, cx| {
                 let Some(here) = menu.update(cx, |t, cx| t.here(window, cx)) else { return m };
-                menus::folder(m, &here)
+                menus::folder(m, &here, crate::templates::cached().as_deref().map(Vec::as_slice))
             })
             .children(banner)
             .child(div().flex_1().min_h_0().child(body))
@@ -1541,6 +1541,7 @@ impl Tab {
     /// A right click on empty space clears the selection and shows the folder's menu.
     fn here(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> menus::Here {
         self.commit_rename(cx);
+        crate::templates::refresh(cx);
         if !self.selected().is_empty() {
             self.list_state_mut().set_selected(Vec::new(), cx);
             self.cursor = None;

@@ -298,6 +298,7 @@ impl Jobs {
                     | Op::SetPermissions { .. }
                     | Op::NewFolder { .. }
                     | Op::NewFile { .. }
+                    | Op::NewFromTemplate { .. }
             )
         )
     }
@@ -324,7 +325,10 @@ impl Jobs {
     fn deliver(&mut self, job: JobId, created: &[PathBuf], cx: &mut Context<Self>) {
         let tracked = self.tracked.get(&job);
         let origin_tab = tracked.and_then(|t| t.origin.tab.clone());
-        let rename = matches!(tracked.and_then(|t| t.op.as_ref()), Some(Op::NewFolder { .. } | Op::NewFile { .. }));
+        let rename = matches!(
+            tracked.and_then(|t| t.op.as_ref()),
+            Some(Op::NewFolder { .. } | Op::NewFile { .. } | Op::NewFromTemplate { .. })
+        );
         if let Some(tab) = self.rename_tab(job) {
             let _ = tab.update(cx, |t, cx| t.rename_ended(job, cx));
         }
@@ -407,7 +411,7 @@ fn verb(op: &Op) -> &'static str {
         Op::Rename { .. } | Op::RenameMany { .. } => "Could not rename",
         Op::SetPermissions { .. } => "Could not change permissions",
         Op::NewFolder { .. } => "Could not create the folder",
-        Op::NewFile { .. } => "Could not create the file",
+        Op::NewFile { .. } | Op::NewFromTemplate { .. } => "Could not create the file",
         Op::Restore { .. } => "Could not restore",
         Op::EmptyTrash => "Could not empty the Trash",
         Op::Compress { .. } => "Could not compress",

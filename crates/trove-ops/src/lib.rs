@@ -52,6 +52,11 @@ pub enum Op {
         parent: PathBuf,
         name: String,
     },
+    /// Copies `template` into `parent` under its own name, or the first free " 2", " 3", ... of it.
+    NewFromTemplate {
+        template: PathBuf,
+        parent: PathBuf,
+    },
     /// Paths inside a trash's `files` directory.
     Restore {
         trashed: Vec<PathBuf>,

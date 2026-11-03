@@ -14,6 +14,8 @@ pub struct Env {
     pub trash: PathBuf,
     pub places: Vec<Place>,
     pub bookmarks: Vec<Place>,
+    /// The templates folder; `None` when the user turned it off.
+    pub templates: Option<PathBuf>,
     /// Recent's paths, fixed for the demo; `None` reads the system's list when asked.
     pub recent: Option<Vec<PathBuf>>,
     /// The demo's mounts and what each has free, inside the fixture; `None` reads the system's.
@@ -51,6 +53,7 @@ pub fn use_demo(root: &Path) -> bool {
             Place { label: "trove".into(), path: at("Projects/trove"), icon: PlaceIcon::Folder },
             Place { label: "Holiday".into(), path: at("Pictures/Holiday"), icon: PlaceIcon::Folder },
         ],
+        templates: Some(at("Templates")),
         recent: Some(crate::demo::RECENT.iter().map(|p| at(p)).collect()),
         volumes: Some(crate::demo::volumes(root)),
         demo: true,
@@ -64,6 +67,7 @@ fn system() -> Env {
         trash: trove_fs::trash_dir().join("files"),
         places: trove_fs::user_dirs(),
         bookmarks: trove_fs::bookmarks(),
+        templates: trove_fs::templates_dir(),
         recent: None,
         volumes: None,
         demo: false,

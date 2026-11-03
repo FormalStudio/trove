@@ -383,6 +383,7 @@ fn the_empty_space_menu_offers_new_items_and_view_options() {
     let want = [
         "New folder",
         "New file",
+        "New from template >",
         "Paste",
         "-",
         "Open in terminal",

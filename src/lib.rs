@@ -31,6 +31,7 @@ mod sidebar;
 mod sound;
 mod status;
 mod tab;
+pub mod templates;
 mod thumbs;
 mod trace;
 mod trash;

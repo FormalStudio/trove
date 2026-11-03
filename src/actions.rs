@@ -64,6 +64,16 @@ actions!(
 #[action(namespace = trove, no_json)]
 pub struct OpenWith(pub String);
 
+/// "New from template": copies this file from the templates folder into the folder shown.
+#[derive(Clone, PartialEq, Debug, Action)]
+#[action(namespace = trove, no_json)]
+pub struct NewFromTemplate(pub PathBuf);
+
+/// "Open templates folder": makes it when missing, then goes there.
+#[derive(Clone, PartialEq, Debug, Action)]
+#[action(namespace = trove, no_json)]
+pub struct OpenTemplatesFolder(pub PathBuf);
+
 /// Makes the app with this desktop id the default for the selection's type.
 #[derive(Clone, PartialEq, Debug, Action)]
 #[action(namespace = trove, no_json)]

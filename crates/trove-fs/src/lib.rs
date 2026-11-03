@@ -12,6 +12,7 @@ pub use entry::{
 };
 pub use listing::{Change, ListError, ListEvent, ListOptions, Listing, list};
 pub use places::{
-    Place, PlaceIcon, add_bookmark, bookmarks, file_uri, recent, remove_bookmark, trash_dir, uri_path, user_dirs,
+    Place, PlaceIcon, add_bookmark, bookmarks, file_uri, parse_templates_dir, recent, remove_bookmark, templates_dir,
+    trash_dir, uri_path, user_dirs,
 };
 pub use volumes::{Usage, Volume, VolumeKind, is_network_path, unmount, usage, volumes, watch_volumes};

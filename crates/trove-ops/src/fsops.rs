@@ -561,6 +561,20 @@ pub(crate) fn create(ctx: &mut Ctx, parent: &Path, name: &str, folder: bool) -> 
     }
 }
 
+/// Copies `template` into `parent` under a name nothing there has.
+pub(crate) fn from_template(ctx: &mut Ctx, template: &Path, parent: &Path) -> R<()> {
+    let is_dir = is_real_dir(&meta(template)?);
+    if !fs::metadata(parent).at(parent)?.is_dir() {
+        return fail(format!("{} is not a folder", name_of(parent)));
+    }
+    count(ctx, &[template.to_path_buf()])?;
+    let dest = parent.join(free_name(parent, &name_of(template), is_dir));
+    copy_entry(ctx, template, &dest, false)?;
+    ctx.created.push(dest);
+    ctx.progress(true);
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

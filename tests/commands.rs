@@ -155,7 +155,7 @@ fn the_folder_menu_has_every_view_sort_and_direction() {
         in_trash: false,
         recent: false,
     };
-    let l = labels(&menus::folder(ContextMenu::default(), &here).items);
+    let l = labels(&menus::folder(ContextMenu::default(), &here, Some(&[])).items);
     for want in [
         "Open in terminal",
         "View > List",
@@ -170,7 +170,7 @@ fn the_folder_menu_has_every_view_sort_and_direction() {
     ] {
         assert!(has(&l, want), "no {want:?} in {l:?}");
     }
-    let recent = labels(&menus::folder(ContextMenu::default(), &Here { recent: true, ..here }).items);
+    let recent = labels(&menus::folder(ContextMenu::default(), &Here { recent: true, ..here }, Some(&[])).items);
     assert!(!has(&recent, "Open in terminal") && !has(&recent, "Properties\u{2026}"), "{recent:?}");
 }
 

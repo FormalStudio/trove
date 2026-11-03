@@ -225,6 +225,7 @@ fn title_of(job: &Job, origin: Origin) -> String {
             Op::Rename { path, .. } => format!("Renaming \"{}\"", name_of(path)),
             Op::NewFolder { name, .. } => format!("Creating folder \"{name}\""),
             Op::NewFile { name, .. } => format!("Creating \"{name}\""),
+            Op::NewFromTemplate { template, .. } => format!("Creating \"{}\"", name_of(template)),
             Op::Restore { trashed } => format!("Restoring {}", count_label(trashed.len(), &first_name(trashed))),
             Op::EmptyTrash => "Emptying Trash".into(),
             Op::Duplicate { paths } => format!("Duplicating {}", count_label(paths.len(), &first_name(paths))),
@@ -264,6 +265,7 @@ fn execute(ctx: &mut Ctx, job: &Job) -> R<()> {
             Op::Rename { path, new_name } => fsops::rename(ctx, path, new_name),
             Op::NewFolder { parent, name } => fsops::create(ctx, parent, name, true),
             Op::NewFile { parent, name } => fsops::create(ctx, parent, name, false),
+            Op::NewFromTemplate { template, parent } => fsops::from_template(ctx, template, parent),
             Op::Restore { trashed } => trash::restore_paths(ctx, trashed),
             Op::EmptyTrash => trash::empty_trash(ctx),
             Op::Compress { paths, dest } => archive::compress(ctx, paths, dest),
@@ -294,6 +296,7 @@ fn inverse_of(job: &Job, ctx: &Ctx) -> Option<Job> {
             | Op::Duplicate { .. }
             | Op::NewFolder { .. }
             | Op::NewFile { .. }
+            | Op::NewFromTemplate { .. }
             | Op::Compress { .. }
             | Op::Extract { .. } => trash_of(&ctx.created),
             Op::Trash { .. } => {

@@ -37,6 +37,36 @@ pub fn register(root: Scaffold, cx: &mut Context<Root>) -> Scaffold {
         }))
         .on_action(cx.listener(|r, _: &NewFolder, _, cx| new_item(r, true, cx)))
         .on_action(cx.listener(|r, _: &NewFile, _, cx| new_item(r, false, cx)))
+        .on_action(cx.listener(|r, NewFromTemplate(template): &NewFromTemplate, _, cx| {
+            if template.as_os_str().is_empty() {
+                return;
+            }
+            if let Some(parent) = here(r, cx) {
+                let o = origin(r, cx);
+                ops::submit(cx, o, Op::NewFromTemplate { template: template.clone(), parent });
+            }
+        }))
+        .on_action(cx.listener(|r, OpenTemplatesFolder(dir): &OpenTemplatesFolder, _, cx| {
+            let (window, dir) = (r.window_id(), dir.clone());
+            let made = dir.clone();
+            // Hosted on the clipboard entity: the root is mid-update while its own callbacks run,
+            // and the go-to below is an action the root handles.
+            ops::background(
+                ops::clip(cx).downgrade(),
+                move || std::fs::create_dir_all(&made).map_err(|e| e.to_string()),
+                move |_: &mut ops::Clip, made, cx| match made {
+                    Ok(()) => {
+                        cx.dispatch_action(window, &GoTo(dir));
+                    }
+                    Err(why) => nd::chrome::alert(
+                        cx,
+                        window,
+                        Alert::new("Could not open the templates folder").message(why),
+                        |_, _| {},
+                    ),
+                },
+            );
+        }))
         .on_action(cx.listener(|r, _: &Duplicate, _, cx| {
             let paths = selection(r, cx);
             if !paths.is_empty() && !in_trash(r, cx) {

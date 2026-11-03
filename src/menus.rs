@@ -11,6 +11,7 @@ use crate::actions::*;
 use crate::keys::ColumnsView;
 use crate::location::Location;
 use crate::tab::View;
+use crate::templates::Node;
 
 /// What a menu on files acts on, read from the tab when the menu opens.
 #[derive(Clone, Debug, Default)]
@@ -104,7 +105,8 @@ pub struct Here {
 }
 
 /// The menu on a folder's empty space.
-pub fn folder(menu: ContextMenu, h: &Here) -> ContextMenu {
+/// `templates` is the last read of the templates folder, `None` while the first is under way.
+pub fn folder(menu: ContextMenu, h: &Here, templates: Option<&[Node]>) -> ContextMenu {
     let mut menu = menu;
     if h.in_trash {
         menu = menu.item_destructive("Empty Trash", EmptyTrash).separator();
@@ -112,6 +114,7 @@ pub fn folder(menu: ContextMenu, h: &Here) -> ContextMenu {
         menu = menu
             .item("New folder", NewFolder)
             .item("New file", NewFile)
+            .submenu(from_template(templates))
             .item("Paste", Paste)
             .separator()
             .item("Open in terminal", OpenTerminal)
@@ -140,6 +143,32 @@ pub fn folder(menu: ContextMenu, h: &Here) -> ContextMenu {
         .submenu(sort)
         .submenu(view);
     if h.recent { menu } else { menu.separator().item("Properties\u{2026}", Properties) }
+}
+
+/// "New from template": the templates folder's files, a subfolder as a submenu of its own.
+fn from_template(templates: Option<&[Node]>) -> Menu {
+    let mut menu = Menu::new("New from template");
+    let none = |label: &'static str| MenuItem::action(label, NewFromTemplate(PathBuf::new())).enabled(false);
+    match templates {
+        None => menu.item(none("Looking\u{2026}")),
+        Some([]) => {
+            menu = menu.item(none("No templates"));
+            match &crate::env::get().templates {
+                Some(dir) => menu
+                    .item(MenuItem::separator())
+                    .item(MenuItem::action("Open templates folder", OpenTemplatesFolder(dir.clone()))),
+                None => menu,
+            }
+        }
+        Some(nodes) => menu.items(nodes.iter().map(template_item)),
+    }
+}
+
+fn template_item(node: &Node) -> MenuItem {
+    match &node.children {
+        Some(children) => MenuItem::submenu(Menu::new(node.label.clone()).items(children.iter().map(template_item))),
+        None => MenuItem::action(node.label.clone(), NewFromTemplate(node.path.clone())),
+    }
 }
 
 /// The menu on a path bar segment: the folder it names, then the folders beside it to jump to.
