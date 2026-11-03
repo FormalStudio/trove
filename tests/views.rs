@@ -295,3 +295,77 @@ fn the_preview_says_what_you_may_do_with_a_file() {
     let info = h.preview().read(&h.cx).loaded().info.clone().expect("the info loaded");
     assert_eq!(info.access.label(), "No access");
 }
+
+/// Ctrl+scroll over the files zooms the view under it: a wheel notch a step, a trackpad's
+/// fractions of one once they add up to a whole step.
+#[test]
+fn ctrl_scroll_zooms_the_view() {
+    let mut h = Harness::new();
+    let scroll = |h: &mut Harness, steps: f32| {
+        let files = h.node("files");
+        let modifiers = KeyModifiers {
+            control: !cfg!(target_os = "macos"),
+            platform: cfg!(target_os = "macos"),
+            ..Default::default()
+        };
+        h.cx.emit(files, ScrollZoomEvent { position: nd::core::Point { x: 40., y: 40. }, steps, modifiers });
+        h.settle();
+    };
+    let list = |h: &Harness| h.tab().read(&h.cx).zoom().list;
+
+    scroll(&mut h, 1.);
+    assert_eq!(list(&h), 1);
+    scroll(&mut h, 0.4);
+    assert_eq!(list(&h), 1, "a fraction of a notch waits for the rest");
+    scroll(&mut h, 0.6);
+    assert_eq!(list(&h), 2);
+    scroll(&mut h, -2.);
+    assert_eq!(list(&h), 0);
+    assert_eq!(trove::settings::get(&h.cx).list_zoom, 0, "kept like Ctrl+-");
+
+    h.act(GridView);
+    let grid = h.tab().read(&h.cx).zoom().grid;
+    scroll(&mut h, -1.);
+    assert_eq!(h.tab().read(&h.cx).zoom().grid, grid - 1, "the grid steps its own size");
+}
+
+/// Rows dragged out of the window carry their files, from the list, the grid, the columns view
+/// and search results, where the platform can start that drag.
+#[test]
+fn dragged_rows_carry_their_files_out() {
+    use nd::virtual_list::ListProps;
+    let mut h = Harness::new();
+    let carried = |h: &Harness| -> Vec<PathBuf> {
+        let backend = h.cx.backend();
+        let ours = |p: &ListProps| p.drag_kind.as_deref() == Some(DRAG_FILES);
+        backend
+            .find(|_, p| p.downcast_ref::<ListProps>().is_some_and(ours))
+            .into_iter()
+            .filter_map(|id| backend.props(id)?.downcast_ref::<ListProps>().map(|l| l.drag_files.clone()))
+            .flat_map(|files| files.into_values())
+            .collect()
+    };
+    let out = nd::platform::has(nd::platform::Feature::DragFilesOut);
+    // Only rows drawn or selected carry their files, and the test backend draws a few.
+    let check = |h: &Harness, view: &str| {
+        let files = carried(h);
+        assert_eq!(!files.is_empty(), out, "{view}");
+        assert!(files.iter().all(|f| f.starts_with(&h.home) && f.exists()), "{view}: {files:?}");
+    };
+
+    for view in ["list", "grid", "columns"] {
+        match view {
+            "grid" => h.act(GridView),
+            "columns" => h.act(ColumnsView),
+            _ => {}
+        }
+        check(&h, view);
+    }
+    h.act(ListView);
+    h.act(FocusSearch);
+    let field = h.node("search");
+    h.cx.emit(field, nd::components::TextChanged { text: "notes".into() });
+    h.settle();
+    assert!(h.tab().read(&h.cx).showing_results());
+    check(&h, "search results");
+}

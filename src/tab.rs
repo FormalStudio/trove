@@ -146,6 +146,8 @@ pub struct Tab {
     /// Picking for another app: which files list, and activating a file accepts the pick.
     pick: Option<Rc<crate::picker::Shown>>,
     zoom: Zoom,
+    /// Ctrl+scroll not yet a whole zoom step: a trackpad sends fractions of a notch.
+    zoom_scroll: f32,
     /// When a single click last opened something, on the frame clock.
     tapped_at: f64,
     _clip: Subscription,
@@ -223,6 +225,7 @@ impl Tab {
             pick: None,
             zoom,
             tapped_at: f64::NEG_INFINITY,
+            zoom_scroll: 0.,
             _clip: watch_clip,
             extras: crate::extras::TabExtras::new(cx),
         };
@@ -1394,7 +1397,7 @@ impl Render for Tab {
                 View::Columns => crate::columns::render(self, cx),
             },
         };
-        let (resize, menu) = (me.clone(), me);
+        let (resize, menu, zoom) = (me.clone(), me.clone(), me);
         let banner = (self.in_trash && !self.entries.is_empty()).then(|| {
             banner("trash-banner", "Items stay in the Trash until you empty it.").action("Empty Trash").on_action(
                 |_: &BannerActionClicked, window, cx| {
@@ -1411,6 +1414,16 @@ impl Render for Tab {
             .flex_col()
             .on_resize(move |r, _, cx| {
                 let _ = resize.update(cx, |t, cx| t.set_width(r.width, cx));
+            })
+            .on_scroll_zoom(move |e: &ScrollZoomEvent, window, cx| {
+                let Some(steps) = zoom.update(cx, |t, _| t.scroll_zoom(e.steps)) else { return };
+                for _ in 0..steps.unsigned_abs() {
+                    if steps > 0 {
+                        cx.dispatch_action(window.id(), &crate::keys::ZoomIn);
+                    } else {
+                        cx.dispatch_action(window.id(), &crate::keys::ZoomOut);
+                    }
+                }
             })
             .context_menu(move |m, window, cx| {
                 let Some(here) = menu.update(cx, |t, cx| t.here(window, cx)) else { return m };
@@ -1446,7 +1459,8 @@ impl Tab {
         }
         let ids = self.drag_ids(state);
         let folders = self.folders.clone();
-        list.drag_rows(DRAG_FILES, move |id| ids.get(id).cloned().unwrap_or_default())
+        carry_files_out(list, ids.clone())
+            .drag_rows(DRAG_FILES, move |id| ids.get(id).cloned().unwrap_or_default())
             .accepts_drops([DRAG_FILES, DragItem::FILES])
             .drop_on(move |id| folders.contains(id))
             .on_drop(move |e: &RowDropped<EntryId>, window, cx| {
@@ -1455,6 +1469,14 @@ impl Tab {
                     cx.dispatch_action(window.id(), &action);
                 }
             })
+    }
+
+    /// The whole zoom steps `steps` more of Ctrl+scroll makes, keeping the remainder.
+    fn scroll_zoom(&mut self, steps: f32) -> i32 {
+        self.zoom_scroll += steps;
+        let whole = self.zoom_scroll.trunc();
+        self.zoom_scroll -= whole;
+        whole as i32
     }
 
     /// The paths the rows a drag can start on carry: the ones drawn and the ones selected.
@@ -1908,4 +1930,13 @@ impl Tab {
         self.sync_view(cx);
         cx.notify();
     }
+}
+
+/// Rows dragged out of the window carry their files to the app they land on, where the platform
+/// can start that drag.
+pub(crate) fn carry_files_out(list: List<EntryId>, ids: Rc<HashMap<EntryId, SharedString>>) -> List<EntryId> {
+    if !nd::platform::has(nd::platform::Feature::DragFilesOut) {
+        return list;
+    }
+    list.drag_out_files(move |id| ids.get(id).filter(|p| !p.is_empty()).map(|p| PathBuf::from(p.to_string())))
 }
