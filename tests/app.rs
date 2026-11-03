@@ -584,3 +584,117 @@ mod picking {
         assert_eq!(p.outcome(), [Outcome::Cancelled]);
     }
 }
+
+#[test]
+fn reopen_closed_tab_brings_back_its_folder_view_and_selection() {
+    let mut h = Harness::new();
+    h.act(NewTab);
+    h.go("Music");
+    h.act(GridView);
+    h.pick("files-grid", &["Album"], Some("Album"));
+    h.act(CloseTab);
+    assert_eq!(h.root().read(&h.cx).tabs().len(), 1);
+    assert!(h.root().read(&h.cx).can_reopen());
+
+    h.act(trove::app_menu::ReopenClosedTab);
+    assert_eq!(h.root().read(&h.cx).tabs().len(), 2);
+    assert_eq!(h.root().read(&h.cx).active_index(), 1, "where it stood in the strip");
+    assert_eq!(h.location(), Location::Dir(Harness::demo("Music")));
+    assert_eq!(h.tab().read(&h.cx).view(), View::Grid);
+    assert_eq!(h.selected(), ["Album"]);
+    assert!(!h.root().read(&h.cx).can_reopen());
+
+    h.act(trove::app_menu::ReopenClosedTab);
+    assert_eq!(h.root().read(&h.cx).tabs().len(), 2, "nothing left to reopen");
+}
+
+#[test]
+fn close_other_tabs_reopen_one_at_a_time() {
+    let mut h = Harness::new();
+    h.go("Music");
+    h.act(NewTab);
+    h.go("Pictures");
+    h.act(NewTab);
+    h.go("Videos");
+    let keep = h.root().read(&h.cx).tab_ids()[2];
+    h.act(CloseOtherTabs(keep));
+    h.act(trove::app_menu::ReopenClosedTab);
+    assert_eq!(h.location(), Location::Dir(Harness::demo("Music")), "the last one closed comes back first");
+    h.act(trove::app_menu::ReopenClosedTab);
+    assert_eq!(h.location(), Location::Dir(Harness::demo("Pictures")));
+    let tabs: Vec<Location> = h.root().read(&h.cx).tabs().iter().map(|t| t.read(&h.cx).location().clone()).collect();
+    assert_eq!(tabs, [Harness::demo("Music"), Harness::demo("Pictures"), Harness::demo("Videos")].map(Location::Dir));
+}
+
+fn menu_rows(menu: ContextMenu) -> Vec<(String, bool, bool)> {
+    menu.items
+        .iter()
+        .filter_map(|item| match item {
+            MenuItem::Action { label, enabled, checked, .. } => Some((label.to_string(), *enabled, *checked)),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn the_app_menu_holds_the_window_commands() {
+    let mut h = Harness::new();
+    let window = h.window.id();
+    if !nd::platform::has(nd::platform::Feature::MenuBar) {
+        assert!(nd::test::by_test_id(&mut h.cx, window, "app-menu").is_some(), "the header has the menu button");
+    }
+    // Show hidden files is a setting other tests flip, so its tick is read off the window.
+    let rows = |h: &Harness| {
+        let r = h.root().read(&h.cx);
+        menu_rows(trove::app_menu::items(ContextMenu::default(), r.shows_hidden(), r.can_reopen()))
+    };
+    let hidden = h.root().read(&h.cx).shows_hidden();
+    let row = |label: &str| (label.to_owned(), true, false);
+    assert_eq!(
+        rows(&h),
+        [
+            row("New window"),
+            row("New tab"),
+            ("Reopen closed tab".to_owned(), false, false),
+            ("Show hidden files".to_owned(), true, hidden),
+            row("Preferences"),
+            row("Keyboard shortcuts"),
+            row("About Trove"),
+        ]
+    );
+    h.act(NewTab);
+    h.act(CloseTab);
+    assert!(rows(&h).contains(&row("Reopen closed tab")), "a closed tab can come back");
+    let ticked = menu_rows(trove::app_menu::items(ContextMenu::default(), true, false));
+    assert!(ticked.contains(&("Show hidden files".to_owned(), true, true)), "{ticked:?}");
+
+    let windows = h.cx.window_ids().count();
+    h.act(trove::app_menu::NewWindow);
+    assert_eq!(h.cx.window_ids().count(), windows + 1, "New window opens a window");
+    h.act(trove::app_menu::Preferences);
+    assert_eq!(h.cx.window_ids().count(), windows + 2, "Preferences opens its window");
+    h.act(trove::app_menu::Preferences);
+    assert_eq!(h.cx.window_ids().count(), windows + 2, "and brings it forward the second time");
+}
+
+#[test]
+fn the_shortcuts_sheet_reads_the_bindings() {
+    let mut h = Harness::new();
+    let groups = trove::app_menu::shortcuts(&h.cx);
+    let keys = |label: &str| {
+        groups.iter().flat_map(|(_, rows)| rows).find(|(l, _)| *l == label).map(|(_, k)| k.clone()).unwrap_or_default()
+    };
+    let mac = nd::platform::target() == nd::platform::Target::MacOs;
+    let secondary = if mac { "Cmd" } else { "Ctrl" };
+    assert_eq!(keys("Reopen closed tab"), format!("{secondary}+Shift+T"));
+    assert_eq!(keys("Reload"), format!("F5, {secondary}+R"));
+    assert_eq!(keys("Parent folder"), "Alt+Up, Backspace");
+    assert_eq!(keys("Quick Look"), "Space");
+    let titles: Vec<&str> = groups.iter().map(|(t, _)| *t).collect();
+    assert_eq!(titles, ["Navigation", "Files", "View", "Windows and tabs"]);
+    assert_eq!(keys("Preferences"), format!("{secondary}+,"));
+
+    let windows = h.cx.window_ids().count();
+    h.act(trove::app_menu::KeyboardShortcuts);
+    assert_eq!(h.cx.window_ids().count(), windows + 1, "the sheet opens over the window");
+}

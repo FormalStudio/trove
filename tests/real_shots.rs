@@ -254,3 +254,75 @@ fn real_sheet_shots() {
     std::thread::sleep(Duration::from_millis(400));
     grab("batch-rename-number");
 }
+
+/// The window chrome, dark and light, in `artifacts/shots/chrome/`: one tab, three tabs, Quick
+/// Look over them, the app menu, Preferences and the keyboard shortcuts.
+#[test]
+fn real_chrome_shots() {
+    if !real_allowed() {
+        println!("skipped: opens a real window; run with ND_REAL=1");
+        return;
+    }
+    const W: u32 = 1600;
+    const H: u32 = 1000;
+    let compositor = Hyprland::start(Options { width: W, height: H, ..Default::default() }).unwrap();
+    let env = compositor.client_env();
+    let runtime = env.iter().find(|(k, _)| *k == "XDG_RUNTIME_DIR").map(|(_, v)| v.clone()).unwrap();
+    let gallery = Path::new(&runtime).join("trove-demo").join("Gallery");
+    pictures(&gallery);
+    let shots = Path::new(env!("CARGO_MANIFEST_DIR")).join("artifacts").join("shots");
+    let out = shots.join("chrome");
+    std::fs::create_dir_all(&out).unwrap();
+
+    for scheme in ["dark", "light"] {
+        let toml = shots.join(format!("theme-{scheme}.toml"));
+        std::fs::write(&toml, format!("appearance = \"{scheme}\"\n")).unwrap();
+        let grab = |name: &str| {
+            let file = out.join(format!("{name}-{scheme}.png"));
+            let status = compositor.command("grim").arg("-l").arg("9").arg(&file).status().unwrap();
+            assert!(status.success(), "grim failed");
+            println!("screenshot {}", file.display());
+        };
+        let mut options = LaunchOptions::new(bin())
+            .arg(gallery.display().to_string())
+            .env("TROVE_DEMO", "1")
+            .env("ND_THEME_TOML", toml.display().to_string());
+        for (key, value) in &env {
+            options = options.env(*key, value.clone());
+        }
+        let app = launch_app(options).unwrap();
+        let keys = |k: &str, settle: u64| {
+            app.keyboard().press(k).unwrap();
+            std::thread::sleep(Duration::from_millis(settle));
+        };
+        expect(&app.get_by_test_id("files-table")).to_be_visible().unwrap();
+        std::thread::sleep(Duration::from_millis(600));
+        keys("down down down down down", 800);
+        grab("one-tab");
+
+        // Home and Documents beside the gallery.
+        keys("ctrl-t", 400);
+        keys("backspace", 600);
+        keys("ctrl-t", 400);
+        keys("d o c enter", 800);
+        grab("three-tabs");
+
+        keys("alt-1", 600);
+        keys("space", 1200);
+        grab("quicklook");
+        keys("space", 600);
+
+        app.get_by_test_id("app-menu").click().unwrap();
+        std::thread::sleep(Duration::from_millis(600));
+        grab("menu");
+        keys("escape", 400);
+        keys("ctrl-?", 800);
+        grab("shortcuts");
+        app.get_by_test_id("shortcuts-done").click().unwrap();
+        std::thread::sleep(Duration::from_millis(400));
+
+        keys("ctrl-,", 1200);
+        grab("preferences");
+        drop(app);
+    }
+}

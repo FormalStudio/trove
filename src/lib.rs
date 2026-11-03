@@ -2,6 +2,7 @@
 //! `tab::Tab` holding its own listing.
 
 pub mod actions;
+pub mod app_menu;
 pub mod batch_rename;
 mod columns;
 mod conflict;
@@ -65,6 +66,8 @@ pub fn init(cx: &mut App) {
     if !cx.has_global::<Bound>() {
         actions::bind(cx);
         keys::bind(cx);
+        app_menu::bind(cx);
+        app_menu::set_menu_bar(cx);
         cx.set_global(Bound);
     }
 }
@@ -135,6 +138,18 @@ pub fn open_conflict_demo(cx: &mut App) -> nd::core::WindowId {
     let sheet = conflict::open(cx, parent.id(), ask);
     ops::run_deferred(cx);
     sheet.id()
+}
+
+/// Preferences over a demo window, for the appearance audit.
+pub fn open_preferences_demo(cx: &mut App) -> nd::core::WindowId {
+    let parent = open_demo(cx);
+    app_menu::open_preferences(cx).map_or(parent.id(), |w| w.id())
+}
+
+/// The keyboard shortcuts sheet over a demo window, for the appearance audit.
+pub fn open_shortcuts_demo(cx: &mut App) -> nd::core::WindowId {
+    let parent = open_demo(cx);
+    app_menu::open_shortcuts(cx, parent.id()).id()
 }
 
 /// A save picker over the demo fixture, for the appearance audit: the name field, the filter

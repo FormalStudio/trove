@@ -21,7 +21,7 @@ pub struct TroveSettings {
     pub single_click: bool,
     /// Ask before moving items to the Trash.
     pub confirm_trash: bool,
-    /// Make thumbnails for files on network mounts, which reads every file over the network.
+    /// Read files on network mounts to make their thumbnails.
     pub network_thumbnails: bool,
     /// Row size in the list and columns views, 0 to 2 (Ctrl+= and Ctrl+- there).
     pub list_zoom: u8,
@@ -74,6 +74,9 @@ pub fn init(cx: &mut App) {
             None
         }
     };
+    if let Some(h) = &handle {
+        nd::components::forms::settings::provide(cx, h.clone());
+    }
     cx.set_global(Loaded { handle, fallback: Arc::new(TroveSettings::default()) });
 }
 

@@ -21,6 +21,8 @@ use crate::tab::{Load, Tab, View};
 /// The widest a tab gets, as in Explorer: a few tabs keep their titles instead of each taking
 /// a share of the window.
 const TAB_W: f32 = 220.;
+/// How many closed tabs Reopen closed tab can bring back.
+const CLOSED_MAX: usize = 16;
 /// The strip's `+` past the last tab.
 const ADD_W: f32 = 44.;
 /// The sidebar's width until the user drags it.
@@ -52,6 +54,16 @@ struct Chrome {
     view: View,
 }
 
+/// A closed tab as Reopen closed tab brings it back, where it stood in the strip.
+#[derive(Clone, Debug)]
+struct ClosedTab {
+    at: usize,
+    location: Location,
+    view: View,
+    sort: trove_fs::SortOrder,
+    selection: Vec<PathBuf>,
+}
+
 pub struct Root {
     weak: WeakEntity<Root>,
     window: WindowId,
@@ -69,6 +81,8 @@ pub struct Root {
     preview_w: f32,
     chrome: Option<Chrome>,
     titles: Vec<String>,
+    /// Closed tabs, the last closed at the end.
+    closed: Vec<ClosedTab>,
     size: (f32, f32),
     /// Set when the window picks files for another app.
     picker: Option<Entity<Picker>>,
@@ -141,6 +155,7 @@ impl Root {
             preview_w: crate::preview::PANE_W,
             chrome: None,
             titles: Vec::new(),
+            closed: Vec::new(),
             size: (0., 0.),
             pick_filter: picker.as_ref().map(|p| p.read(cx).filter_index()),
             picker,
@@ -239,6 +254,14 @@ impl Root {
 
     pub fn shows_preview(&self) -> bool {
         self.show_preview
+    }
+
+    pub fn shows_hidden(&self) -> bool {
+        self.show_hidden
+    }
+
+    pub fn can_reopen(&self) -> bool {
+        !self.closed.is_empty()
     }
 
     pub fn picker(&self) -> Option<&Entity<Picker>> {
@@ -370,6 +393,7 @@ impl Root {
             cx.close_window(self.window);
             return;
         }
+        self.remember_closed(index, cx);
         self.tabs.remove(index);
         let next = if index < self.active || self.active >= self.tabs.len() {
             self.active.saturating_sub(1)
@@ -378,6 +402,36 @@ impl Root {
         };
         self.refresh_titles(cx);
         self.activate(next, window, cx);
+    }
+
+    /// Keeps the tab at `index` for Reopen closed tab.
+    fn remember_closed(&mut self, index: usize, cx: &App) {
+        let Some((_, tab)) = self.tabs.get(index) else { return };
+        let t = tab.read(cx);
+        let dir = t.location().dir().map(Path::to_path_buf);
+        let selection =
+            t.selected_paths().into_iter().filter(|p| dir.as_deref().is_some_and(|d| p.parent() == Some(d))).collect();
+        let closed = ClosedTab { at: index, location: t.location().clone(), view: t.view(), sort: t.sort(), selection };
+        if self.closed.len() == CLOSED_MAX {
+            self.closed.remove(0);
+        }
+        self.closed.push(closed);
+    }
+
+    /// Brings back the last closed tab where it stood, with its view, sort and selection.
+    pub(crate) fn reopen_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(closed) = self.closed.pop() else { return };
+        let tab = self.make_tab(closed.location, closed.view, cx);
+        let (sort, selection) = (closed.sort, closed.selection);
+        tab.update(cx, |t, cx| {
+            t.set_sort(sort, cx);
+            t.select_created(selection, false, cx);
+        });
+        let at = closed.at.min(self.tabs.len());
+        let id = self.take_id();
+        self.tabs.insert(at, (id, tab));
+        self.refresh_titles(cx);
+        self.activate(at, window, cx);
     }
 
     fn cycle(&mut self, step: isize, window: &mut Window, cx: &mut Context<Self>) {
@@ -457,6 +511,9 @@ impl Root {
 
     fn close_other_tabs(&mut self, keep: u64, window: &mut Window, cx: &mut Context<Self>) {
         let Some(at) = self.position(keep) else { return };
+        for i in (0..self.tabs.len()).rev().filter(|i| *i != at) {
+            self.remember_closed(i, cx);
+        }
         let keep = self.tabs.remove(at);
         self.tabs = vec![keep];
         self.refresh_titles(cx);
@@ -540,12 +597,18 @@ impl Root {
             })
     }
 
-    fn tab_strip(&self) -> impl IntoElement + use<> {
+    /// The tabs share the band's width up to [`TAB_W`] each; the band runs the files' whole
+    /// width on the strip's own surface, its hairline carried on past the last tab.
+    fn tab_strip(&self, cx: &App) -> impl IntoElement + use<> {
+        let theme = cx.theme();
         let count = self.tabs.len();
         h_flex()
             .id("tab-strip")
             .w_full()
-            .child(div().flex_1().min_w_0().max_w(px(TAB_W * count as f32 + ADD_W)).child(self.tab_bar()))
+            .items_stretch()
+            .bg(theme.surface.sidebar)
+            .child(div().min_w_0().w(px(TAB_W * count as f32 + ADD_W)).child(self.tab_bar()))
+            .child(div().flex_1().border_b_1().border_color(theme.border.subtle))
     }
 
     fn tab_bar(&self) -> TabStrip {
@@ -630,12 +693,17 @@ impl Root {
         // opening under the header (Ctrl+F opens it too).
         let toolbar =
             if self.files_w() >= SEARCH_ROOM { toolbar.persistent_search(field) } else { toolbar.item(field) };
-        toolbar.item(
+        let toolbar = toolbar.item(
             icon_button("preview-toggle", Icon::PanelRight)
                 .tooltip("Preview")
                 .checked(self.show_preview)
                 .dispatch(TogglePreview),
-        )
+        );
+        let menu = if self.picker.is_some() { None } else { crate::app_menu::header_button(self.me()) };
+        match menu {
+            Some(button) => toolbar.item(button),
+            None => toolbar,
+        }
     }
 
     /// The preview pane's width as drawn: it gives up its own width, down to its least, before
@@ -653,6 +721,7 @@ impl Root {
     fn actions(&self, root: Scaffold, cx: &mut Context<Self>) -> Scaffold {
         let root = crate::fileops::register(root, cx);
         let root = crate::keys::on_root(root, cx);
+        let root = if self.picker.is_some() { root } else { crate::app_menu::on_root(root, cx) };
         root.on_action(cx.listener(Self::open))
             .on_action(
                 cx.listener(|this, DuplicateTab(id): &DuplicateTab, window, cx| this.duplicate_tab(*id, window, cx)),
@@ -857,15 +926,14 @@ impl Render for Root {
         if self.preview.read(cx).width() != preview_w {
             self.preview.update(cx, |p, cx| p.set_width(preview_w, cx));
         }
-        let tabs = (self.tabs.len() > 1).then(|| self.tab_strip());
+        let tabs = (self.tabs.len() > 1).then(|| self.tab_strip(cx));
         let content = v_flex()
             .size_full()
             .on_navigate(|e: &NavigateEvent, window, cx| history(e, window, cx))
             .children(tabs)
             .child(div().flex_1().min_h_0().child(self.active_tab().clone()))
             .child(self.status.clone())
-            .children(self.picker.clone())
-            .child(self.quicklook.clone());
+            .children(self.picker.clone());
         let root = scaffold()
             .key_context(WINDOW)
             .toolbar(self.toolbar(cx))
@@ -901,7 +969,9 @@ impl Render for Root {
                         cx.notify();
                     }))
                     .child(crate::preview::pane(&self.preview, self.show_preview, cx)),
-            );
+            )
+            // Over the whole window, so its scrim dims the sidebar and the toolbar too.
+            .overlay(self.quicklook.clone());
         self.actions(root, cx)
     }
 }

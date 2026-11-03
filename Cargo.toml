@@ -51,7 +51,7 @@ zbus = { version = "5.19", default-features = false, features = ["async-io"] }
 async-io = "2.6"
 async-process = "2.5"
 futures-lite = "2.6"
-nd = { git = "https://github.com/FormalStudio/NativeDesktop", branch = "main" }
+nd = { git = "https://github.com/FormalStudio/NativeDesktop", branch = "main", features = ["settings-ui"] }
 
 [dev-dependencies]
 nd = { git = "https://github.com/FormalStudio/NativeDesktop", branch = "main", features = ["test", "audit"] }
