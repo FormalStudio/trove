@@ -2,6 +2,7 @@
 //! on their real threads and each step drains them before reading.
 
 use std::path::PathBuf;
+use std::sync::OnceLock;
 use std::time::Duration;
 
 use nd::prelude::*;
@@ -13,6 +14,17 @@ use trove_fs::{SortKey, SortOrder};
 const ROOT_NAMES: &[&str] =
     &["Desktop", "Documents", "Downloads", "Logs", "Music", "Pictures", "Projects", "Videos", "Notes.md", "todo.txt"];
 
+/// The fixture this process runs on, in its own folder: `nd test` gives every test a process,
+/// and the fixture's settings and state files (Ctrl+H writes `show_hidden`) must not reach a
+/// test beside it.
+fn fixture() -> &'static PathBuf {
+    static FIXTURE: OnceLock<PathBuf> = OnceLock::new();
+    FIXTURE.get_or_init(|| {
+        let dir = tempfile::Builder::new().prefix("trove-app").tempdir_in(env!("CARGO_TARGET_TMPDIR")).unwrap().keep();
+        trove::demo_root_in(&dir)
+    })
+}
+
 struct Harness {
     cx: TestApp,
     window: WindowHandle<Root>,
@@ -20,10 +32,10 @@ struct Harness {
 
 impl Harness {
     fn new() -> Self {
+        let home = fixture().clone();
         let mut cx = TestApp::new();
         let window = cx.open_window(Size { width: 1200., height: 800. }, |window, cx| {
             trove::init(cx);
-            let home = trove::demo_root();
             cx.new(|cx| Root::new(trove::Start::Path(home), window, cx))
         });
         let mut h = Self { cx, window };
@@ -85,8 +97,7 @@ impl Harness {
     }
 
     fn demo(rel: &str) -> PathBuf {
-        let base = std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from).unwrap_or_else(std::env::temp_dir);
-        let root = base.join("trove-demo");
+        let root = fixture().clone();
         if rel.is_empty() { root } else { root.join(rel) }
     }
 
@@ -332,7 +343,7 @@ fn a_file_path_opens_its_folder_with_the_file_selected() {
     let mut cx = TestApp::new();
     let window = cx.open_window(Size { width: 1200., height: 800. }, |window, cx| {
         trove::init(cx);
-        let file = trove::demo_root().join("Documents/Roadmap.pptx");
+        let file = Harness::demo("Documents/Roadmap.pptx");
         cx.new(|cx| Root::new(trove::Start::Path(file), window, cx))
     });
     let root = window.root().clone();
@@ -424,6 +435,7 @@ mod picking {
 
     impl Picking {
         fn new(request: Request) -> Self {
+            fixture();
             let mut cx = TestApp::new();
             let alerts = Rc::new(Alerts::default());
             cx.set_global(Chrome(alerts.clone()));
@@ -431,7 +443,6 @@ mod picking {
             let out = outcome.clone();
             let window = cx.open_window(Size { width: 1000., height: 700. }, move |window, cx| {
                 trove::init(cx);
-                trove::demo_root();
                 let done = Box::new(move |o, _: &mut App| out.borrow_mut().push(o));
                 cx.new(|cx| Root::picking(request, done, window, cx))
             });

@@ -23,12 +23,11 @@ struct Harness {
 }
 
 impl Harness {
-    /// Over the shared demo fixture, which these tests only read.
     fn new() -> Self {
-        Self::at(trove::demo_root(), None)
+        Self::private()
     }
 
-    /// Over a fixture of its own, for tests that change files.
+    /// Over a fixture of its own: the settings and state files live in it too.
     fn private() -> Self {
         let dir = tempfile::tempdir().unwrap();
         let root = trove::demo_root_in(dir.path());
