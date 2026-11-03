@@ -44,6 +44,7 @@ pub struct BatchRename {
 /// Opens the sheet for `paths`, in the order the listing shows them, over the origin's window.
 pub fn open(cx: &mut App, origin: Origin, paths: Vec<PathBuf>) -> WindowHandle<BatchRename> {
     let options = WindowOptions::main("main.rename")
+        .title(format!("Rename {} items", paths.len()))
         .kind(WindowKind::Sheet { parent: origin.window })
         .size(size(px(560.), px(540.)));
     cx.open_window(options, move |_, cx| cx.new(|cx| BatchRename::new(origin, paths, cx)))

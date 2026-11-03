@@ -110,8 +110,14 @@ pub struct PropertiesSheet {
 
 /// Opens the sheet for `paths` over the window `parent`.
 pub fn open(cx: &mut App, parent: nd::core::WindowId, paths: Vec<PathBuf>) -> WindowHandle<PropertiesSheet> {
-    let options =
-        WindowOptions::main("main.properties").kind(WindowKind::Sheet { parent }).size(size(px(480.), px(500.)));
+    let title = match paths.as_slice() {
+        [one] => format!("Properties of {}", ops::name_of(one)),
+        many => format!("Properties of {} items", many.len()),
+    };
+    let options = WindowOptions::main("main.properties")
+        .title(title)
+        .kind(WindowKind::Sheet { parent })
+        .size(size(px(480.), px(500.)));
     let origin = Origin { window: parent, tab: None };
     cx.open_window(options, move |_, cx| cx.new(|cx| PropertiesSheet::new(paths, origin, cx)))
 }

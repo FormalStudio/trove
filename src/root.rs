@@ -30,7 +30,9 @@ const SIDEBAR_W: f32 = 232.;
 /// The least the files get beside the preview pane while the pane can still narrow.
 const FILES_MIN: f32 = 440.;
 /// The header over the files keeps its search field from this width up.
-const SEARCH_ROOM: f32 = 620.;
+const SEARCH_ROOM: f32 = 860.;
+/// Below this width the header's three view buttons fold into one menu, for the path bar.
+const VIEW_ROOM: f32 = 440.;
 
 /// Where the first tab opens.
 #[derive(Clone, Debug, PartialEq)]
@@ -634,6 +636,19 @@ impl Root {
             })
     }
 
+    fn view_menu(&self) -> impl IntoElement + use<> {
+        let view = self.chrome.as_ref().map_or(View::List, |c| c.view);
+        let glyph = match view {
+            View::List => icons::list_view(),
+            View::Grid => icons::grid_view(),
+            View::Columns => icons::columns_view(),
+        };
+        menu_button("view", glyph, |menu, _, _| {
+            menu.item("List", ListView).item("Grid", GridView).item("Columns", crate::keys::ColumnsView)
+        })
+        .tooltip("View")
+    }
+
     /// The tabs share the band's width up to [`TAB_W`] each; the band runs the files' whole
     /// width on the strip's own surface, its hairline carried on past the last tab.
     fn tab_strip(&self, cx: &App) -> impl IntoElement + use<> {
@@ -724,8 +739,9 @@ impl Root {
             .navigation(
                 icon_button("forward", Icon::ChevronRight).tooltip("Forward").disabled(!can_forward).dispatch(Forward),
             )
-            .flexible_item(self.pathbar.clone())
-            .item(self.view_switch());
+            .flexible_item(self.pathbar.clone());
+        let toolbar =
+            if self.files_w() >= VIEW_ROOM { toolbar.item(self.view_switch()) } else { toolbar.item(self.view_menu()) };
         // A header too narrow for the field keeps libadwaita's search toggle instead, its bar
         // opening under the header (Ctrl+F opens it too).
         let toolbar =
@@ -969,8 +985,11 @@ impl Render for Root {
             self.preview.update(cx, |p, cx| p.set_width(preview_w, cx));
         }
         let tabs = (self.tabs.len() > 1).then(|| self.tab_strip(cx));
+        // The toolbar is built from the window's size, which a resize changes without asking
+        // this view to render.
         let content = v_flex()
             .size_full()
+            .on_resize(cx.listener(|_, _, _, cx| cx.notify()))
             .on_navigate(|e: &NavigateEvent, window, cx| history(e, window, cx))
             .children(tabs)
             .child(div().flex_1().min_h_0().child(self.active_tab().clone()))
