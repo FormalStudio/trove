@@ -381,6 +381,7 @@ index is over 5 minutes old a query also walks its scope 3 levels deep to catch 
 | Ctrl+L | edit the path |
 | Ctrl+H | show hidden files (per window, remembered) |
 | Ctrl+1, Ctrl+2, Ctrl+3 | list, grid, columns view |
+| Ctrl+=, Ctrl+-, Ctrl+0 | bigger, smaller, default rows (list, columns) or tiles (grid), remembered |
 | Ctrl+I | show the preview pane |
 | Ctrl+A | select all |
 | F5, Ctrl+R | reload |

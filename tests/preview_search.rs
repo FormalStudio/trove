@@ -299,14 +299,13 @@ fn the_scope_row_marks_the_scope_searched() {
     let mut h = Harness::at(look());
     h.search("report");
     let window = h.window.id();
-    let checked = |h: &mut Harness, id: &str| by_test_id(&mut h.cx, window, id).expect(id).checked;
-    assert_eq!(checked(&mut h, "search-scope-folder"), Some(true));
-    assert_eq!(checked(&mut h, "search-scope-home"), Some(false));
-    nd::test::click(&mut h.cx, window, "search-scope-home");
+    let shown = |h: &mut Harness| by_test_id(&mut h.cx, window, "search-scope-switch").expect("the switch").value;
+    assert_eq!(shown(&mut h).as_deref(), Some("This folder \u{201c}look\u{201d}"));
+    let node = by_test_id(&mut h.cx, window, "search-scope-switch").expect("the switch").id;
+    h.cx.perform(node, &nd::test::SemanticAction::SetValue("Home".into())).expect("Home is an option");
     h.settle();
     assert_eq!(h.tab().read(&h.cx).results().scope(), Scope::Home);
-    assert_eq!(checked(&mut h, "search-scope-folder"), Some(false));
-    assert_eq!(checked(&mut h, "search-scope-home"), Some(true));
+    assert_eq!(shown(&mut h).as_deref(), Some("Home"));
     assert!(h.result_names().contains(&"report-home.txt".to_owned()), "{:?}", h.result_names());
 }
 

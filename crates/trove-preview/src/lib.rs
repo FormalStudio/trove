@@ -12,6 +12,6 @@ pub mod thumbs;
 
 pub use config::Config;
 pub use engine::Engine;
-pub use info::{Info, info, info_blocking};
+pub use info::{Access, Info, info, info_blocking};
 pub use preview::{Preview, preview, preview_with};
-pub use thumbs::{ThumbSize, Thumbnails};
+pub use thumbs::{Made, ThumbSize, Thumbnails};

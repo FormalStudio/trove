@@ -25,16 +25,16 @@ use crate::menus;
 use crate::ops::{self, Clip, Origin};
 use crate::pump::pump;
 use crate::trash::{self, TrashInfo};
+use crate::zoom::{RowSize, TileSize, Zoom};
 
-/// List rows, Finder's density.
-pub const ROW_HEIGHT: f32 = 28.;
-const TILE: (f32, f32) = (112., 104.);
 const TYPE_SELECT_WINDOW: f64 = 0.8;
 const SIZE_W: f32 = 96.;
 const KIND_W: f32 = 132.;
 const DATE_W: f32 = 168.;
 const NAME_MIN: f32 = 200.;
 const NAME_MAX: f32 = 560.;
+/// The share of a wide window the names grow to before the other columns take the rest.
+const NAME_SHARE: f32 = 0.5;
 /// What a still-unmeasured content area is taken to be on the first frame.
 const DEFAULT_WIDTH: f32 = 760.;
 const ORIGIN_W: f32 = 220.;
@@ -145,14 +145,18 @@ pub struct Tab {
     synced: (View, Vec<(EntryId, u64)>),
     /// Picking for another app: which files list, and activating a file accepts the pick.
     pick: Option<Rc<crate::picker::Shown>>,
+    zoom: Zoom,
+    /// When a single click last opened something, on the frame clock.
+    tapped_at: f64,
     _clip: Subscription,
     pub(crate) extras: crate::extras::TabExtras,
 }
 
 impl Tab {
     pub fn new(location: Location, show_hidden: bool, view: View, cx: &mut Context<Self>) -> Self {
-        let table = ListState::new(cx).estimated_row_height(px(ROW_HEIGHT));
-        let grid = ListState::new(cx).estimated_row_height(px(TILE.1));
+        let zoom = Zoom::of(&crate::settings::get(cx));
+        let table = ListState::new(cx).estimated_row_height(px(zoom.row().height));
+        let grid = ListState::new(cx).estimated_row_height(px(zoom.tile().tile.1));
         let search = cx.new(|_| TextFieldState::default().placeholder("Search"));
         cx.observe(&search, |this: &mut Tab, search, cx| {
             if search.read(cx).last_event() == Some(TextEvent::Edited) {
@@ -217,6 +221,8 @@ impl Tab {
             names_traced: 0,
             synced: (view, Vec::new()),
             pick: None,
+            zoom,
+            tapped_at: f64::NEG_INFINITY,
             _clip: watch_clip,
             extras: crate::extras::TabExtras::new(cx),
         };
@@ -722,6 +728,31 @@ impl Tab {
         self.pick.is_some()
     }
 
+    pub fn zoom(&self) -> Zoom {
+        self.zoom
+    }
+
+    pub(crate) fn row_size(&self) -> RowSize {
+        self.zoom.row()
+    }
+
+    pub(crate) fn tile_size(&self) -> TileSize {
+        self.zoom.tile()
+    }
+
+    /// Redraws every row and tile at the sizes `zoom` gives.
+    pub fn set_zoom(&mut self, zoom: Zoom, cx: &mut Context<Self>) {
+        if self.zoom == zoom {
+            return;
+        }
+        self.zoom = zoom;
+        self.table.invalidate_all(cx);
+        self.grid.invalidate_all(cx);
+        self.extras.results.list.invalidate_all(cx);
+        self.extras.columns.invalidate_all(cx);
+        cx.notify();
+    }
+
     pub fn set_show_hidden(&mut self, show: bool, cx: &mut Context<Self>) {
         if self.show_hidden != show {
             self.show_hidden = show;
@@ -887,7 +918,7 @@ impl Tab {
         }
     }
 
-    fn columns(&self) -> Vec<Column> {
+    pub fn columns(&self) -> Vec<Column> {
         let sort = self.sort();
         let dir = if sort.ascending { SortDirection::Ascending } else { SortDirection::Descending };
         let col = |id: &'static str, title: &'static str, key: SortKey, width: f32| {
@@ -913,15 +944,15 @@ impl Tab {
                 _ => 0.,
             })
             .sum();
-        // Past NAME_MAX the names stop growing and the last column takes the rest, as in
-        // Finder, so a wide window keeps the details beside the names.
-        let name = (self.width - rest).clamp(NAME_MIN, NAME_MAX);
-        let last = (self.width - rest - name).max(0.);
+        // The names grow with the window to half of it; past that the details share the rest,
+        // so a wide window keeps them beside the names with no empty band at the end.
+        let name = (self.width - rest).clamp(NAME_MIN, NAME_MAX.max(self.width * NAME_SHARE));
+        let more = (self.width - rest - name).max(0.) / (ids.len() - 1).max(1) as f32;
         ids.iter()
             .map(|id| match *id {
-                "size" => col("size", "Size", SortKey::Size, SIZE_W),
-                "kind" => col("kind", "Kind", SortKey::Kind, KIND_W),
-                "modified" => col("modified", "Modified", SortKey::Modified, DATE_W + last),
+                "size" => col("size", "Size", SortKey::Size, SIZE_W + more),
+                "kind" => col("kind", "Kind", SortKey::Kind, KIND_W + more),
+                "modified" => col("modified", "Modified", SortKey::Modified, DATE_W + more),
                 _ => col("name", "Name", SortKey::Name, name),
             })
             .collect()
@@ -935,7 +966,8 @@ impl Tab {
         {
             return self.rename_field(r, false, cx);
         }
-        let thumb = if col_id == "name" { crate::thumbs::for_entry(self.path_of(&id), e, cx) } else { None };
+        let size = self.row_size();
+        let thumb = if col_id == "name" { crate::thumbs::for_entry(self.path_of(&id), e, size.art, cx) } else { None };
         let theme = cx.theme();
         let info = self.trash_info.get(&id);
         let quiet = |s: String| text(s).text_color(theme.text.secondary).tabular_nums().truncate().into_any_element();
@@ -946,7 +978,7 @@ impl Tab {
                 h_flex()
                     .gap(theme.spacing.sm)
                     .min_w_0()
-                    .child(crate::thumbs::row_art(thumb, glyph, icons::tint(e.file_kind, theme), theme))
+                    .child(crate::thumbs::row_art(thumb, glyph, icons::tint(e.file_kind, theme), size, theme))
                     .child(div().flex_1().min_w_0().child(
                         text(e.name.to_string()).truncate().when(e.hidden, |t| t.text_color(theme.text.secondary)),
                     ))
@@ -964,7 +996,8 @@ impl Tab {
             _ => quiet(e.meta.as_ref().and_then(|m| m.modified).map(|t| self.today.modified(t)).unwrap_or_default()),
         };
         let row = h_flex()
-            .h(px(ROW_HEIGHT))
+            .when(col_id == "name", |d| d.id(row_id(&e.name)))
+            .h(px(size.height))
             .px(theme.spacing.sm)
             .items_center()
             .when(self.cut.contains(&id), |d| d.opacity(0.5))
@@ -972,14 +1005,19 @@ impl Tab {
         self.file_events(row, id, cx).into_any_element()
     }
 
-    /// A row's or tile's menu, and a middle click on a folder opening it in a new tab.
+    /// A row's or tile's menu, a click opening it under the single click setting, and a middle
+    /// click on a folder opening it in a new tab.
     pub(crate) fn file_events(&self, d: Div, id: EntryId, cx: &mut Context<Self>) -> Div {
         let Some(path) = self.path_of(&id) else { return d };
-        let me = cx.weak_entity();
-        let d = d.context_menu(move |menu, _, cx| {
-            let Some(target) = me.update(cx, |t, cx| t.menu_target(id, cx)) else { return menu };
-            menus::files(menu, &target, cx)
-        });
+        let (me, tap) = (cx.weak_entity(), cx.weak_entity());
+        let d = d
+            .context_menu(move |menu, _, cx| {
+                let Some(target) = me.update(cx, |t, cx| t.menu_target(id, cx)) else { return menu };
+                menus::files(menu, &target, cx)
+            })
+            .on_tap(move |e: &TapEvent, window, cx| {
+                let _ = tap.update(cx, |t, cx| t.tapped(id, e, window, cx));
+            });
         if !self.is_folder(&id) {
             return d;
         }
@@ -1010,7 +1048,7 @@ impl Tab {
     }
 
     /// The name field of a rename in progress, in a row or (`tile`) under a tile's picture.
-    fn rename_field(&self, r: &Rename, tile: bool, cx: &mut Context<Self>) -> AnyElement {
+    pub(crate) fn rename_field(&self, r: &Rename, tile: bool, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme();
         let (change, end, cancel) = (cx.weak_entity(), cx.weak_entity(), cx.weak_entity());
         let folder = self.listed_folder(&r.id);
@@ -1039,11 +1077,18 @@ impl Tab {
         if tile {
             return v_flex().w_full().gap(theme.spacing.xs).child(field).children(error).into_any_element();
         }
-        let glyph = self
-            .entry(&r.id)
-            .map(|e| icon(icons::for_kind(e.file_kind), 16.).text_color(icons::tint(e.file_kind, theme)));
+        let size = self.row_size();
+        let glyph = self.entry(&r.id).map(|e| {
+            div()
+                .size(px(size.art))
+                .flex_none()
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(icon(icons::for_kind(e.file_kind), size.glyph).text_color(icons::tint(e.file_kind, theme)))
+        });
         h_flex()
-            .h(px(ROW_HEIGHT))
+            .h(px(size.height))
             .px(theme.spacing.sm)
             .gap(theme.spacing.sm)
             .items_center()
@@ -1082,7 +1127,8 @@ impl Tab {
         let path = self.path_of(&id);
         let Some(e) = self.entry(&id) else { return div().into_any_element() };
         let lit = self.lit.contains(&id);
-        let art = crate::thumbs::tile_art(path, e, lit, cx);
+        let size = self.tile_size();
+        let art = crate::thumbs::tile_art(path, e, lit, size, cx);
         let theme = cx.theme();
         let label = match field {
             Some(field) => field,
@@ -1110,7 +1156,7 @@ impl Tab {
         // The grid fills a selected cell whole; a lit tile covers that with the listing's own
         // background and draws Finder's selection instead: a plate behind the picture and the
         // name on an accent pill.
-        let tile = div().w_full().h(px(TILE.1)).when(lit, |d| d.bg(theme.surface.base)).child(
+        let tile = div().id(row_id(&e.name)).w_full().h(px(size.tile.1)).when(lit, |d| d.bg(theme.surface.base)).child(
             v_flex()
                 .size_full()
                 .items_center()
@@ -1134,6 +1180,9 @@ impl Tab {
         match self.load {
             Load::Listed | Load::Complete if self.location == Location::Recent => {
                 status_page("Nothing recent").icon(icons::recent()).compact().into_any_element()
+            }
+            Load::Listed | Load::Complete if self.in_trash && self.entries.is_empty() => {
+                status_page("Trash is empty").id("trash-empty").icon(Icon::Trash).compact().into_any_element()
             }
             Load::Listed | Load::Complete if !self.entries.is_empty() => status_page("Only hidden files")
                 .icon(Icon::EyeOff)
@@ -1165,6 +1214,11 @@ impl Tab {
         };
         status_page(title).id("listing-error").icon(icon).description(description).into_any_element()
     }
+}
+
+/// The test id of the row or tile showing the entry `name`.
+pub fn row_id(name: &str) -> String {
+    format!("file-{name}")
 }
 
 /// The key `by` rows from `cursor` in `rows`, wrapping round; the first or last with none.
@@ -1323,7 +1377,7 @@ impl Render for Tab {
                     let cell = cx.processor(Self::table_cell);
                     let list =
                         table(TABLE_ID, &self.table, self.columns(), move |id, col, w, cx| cell((id, col), w, cx))
-                            .estimated_row_height(px(ROW_HEIGHT))
+                            .estimated_row_height(px(self.row_size().height))
                             .on_sort(move |e: &SortChanged, _, cx| {
                                 let _ = sort.update(cx, |t, cx| t.on_sort(e, cx));
                             })
@@ -1331,7 +1385,8 @@ impl Render for Tab {
                     self.file_list(list, &self.table, cx).into_any_element()
                 }
                 View::Grid => {
-                    let list = grid(GRID_ID, &self.grid, (px(TILE.0), px(TILE.1)), cx.processor(Self::tile))
+                    let (w, h) = self.tile_size().tile;
+                    let list = grid(GRID_ID, &self.grid, (px(w), px(h)), cx.processor(Self::tile))
                         .gap(theme.spacing.xs)
                         .empty(self.empty_state());
                     self.file_list(list, &self.grid, cx).into_any_element()
@@ -1340,7 +1395,7 @@ impl Render for Tab {
             },
         };
         let (resize, menu) = (me.clone(), me);
-        let banner = self.in_trash.then(|| {
+        let banner = (self.in_trash && !self.entries.is_empty()).then(|| {
             banner("trash-banner", "Items stay in the Trash until you empty it.").action("Empty Trash").on_action(
                 |_: &BannerActionClicked, window, cx| {
                     cx.dispatch_action(window.id(), &crate::actions::EmptyTrash);
@@ -1384,7 +1439,7 @@ impl Tab {
                 let _ = sel.update(cx, |t, cx| t.on_selection_change(e, cx));
             })
             .on_activate(move |e: &ActivateEvent<EntryId>, window, cx| {
-                let _ = act.update(cx, |t, cx| t.open(e.key, window, cx));
+                let _ = act.update(cx, |t, cx| t.activate(e.key, window, cx));
             });
         if self.in_trash {
             return list;
@@ -1438,6 +1493,10 @@ impl Tab {
 
     pub fn trash_info(&self, name: &str) -> Option<&TrashInfo> {
         self.trash_info.get(&EntryId::of(name))
+    }
+
+    pub(crate) fn is_cut(&self, id: &EntryId) -> bool {
+        self.cut.contains(id)
     }
 
     pub fn cut_names(&self) -> Vec<String> {
@@ -1721,7 +1780,45 @@ impl Tab {
     }
 }
 
+/// How long after a single click opened something its double click's second press is ignored,
+/// so a double click from habit does not open what lands under the pointer next.
+const SECOND_PRESS: f64 = 0.5;
+
 impl Tab {
+    /// A plain click on a row, tile or the columns' own column: opens it under the single
+    /// click setting. While picking, a click only selects, as a file chooser's does.
+    fn tapped(&mut self, id: EntryId, e: &TapEvent, window: &mut Window, cx: &mut Context<Self>) {
+        // The columns view lists a folder as soon as it is selected; only files open there.
+        if self.view == View::Columns && !self.extras.results.shown() && self.is_folder(&id) {
+            return;
+        }
+        if self.single_click(e, window, cx) {
+            self.open(id, window, cx);
+        }
+    }
+
+    /// Whether `e` opens what it landed on under the single click setting; notes when it did.
+    pub(crate) fn single_click(&mut self, e: &TapEvent, window: &Window, cx: &App) -> bool {
+        if e.count != 1 || e.modifiers.any() || self.pick.is_some() || !crate::settings::get(cx).single_click {
+            return false;
+        }
+        self.tapped_at = window.now();
+        true
+    }
+
+    /// Whether an activation is the second press of a double click whose first press already
+    /// opened something under the single click setting.
+    pub(crate) fn second_press(&self, window: &Window) -> bool {
+        window.now() - self.tapped_at < SECOND_PRESS
+    }
+
+    /// A double click on a row.
+    pub(crate) fn activate(&mut self, id: EntryId, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.second_press(window) {
+            self.open(id, window, cx);
+        }
+    }
+
     pub fn open(&mut self, id: EntryId, window: &mut Window, cx: &mut Context<Self>) {
         let Some(path) = self.path_of(&id) else { return };
         if self.is_folder(&id) {

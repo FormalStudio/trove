@@ -274,10 +274,10 @@ fn wait_for_lines(log: &Path, n: usize) {
     }
 }
 
-fn names(rx: &flume::Receiver<(PathBuf, Option<PathBuf>)>, n: usize) -> Vec<String> {
+fn names(rx: &flume::Receiver<Made>, n: usize) -> Vec<String> {
     (0..n)
         .map(|_| {
-            let (p, t) = rx.recv_timeout(Duration::from_secs(15)).unwrap();
+            let (p, _, t) = rx.recv_timeout(Duration::from_secs(15)).unwrap();
             assert!(t.is_some());
             p.file_name().unwrap().to_string_lossy().into_owned()
         })
@@ -343,7 +343,7 @@ fn pool_answers_none_for_a_file_that_cannot_be_thumbnailed() {
     let (pool, rx) = Thumbnails::with_engine(r.engine.clone(), 2);
     let missing = r.dir.join("gone.png");
     pool.request(missing.clone(), SystemTime::now(), ThumbSize::Normal);
-    assert_eq!(rx.recv_timeout(Duration::from_secs(5)).unwrap(), (missing, None));
+    assert_eq!(rx.recv_timeout(Duration::from_secs(5)).unwrap(), (missing, ThumbSize::Normal, None));
 }
 
 trait InoForTest {
@@ -418,7 +418,7 @@ fn bench_cold_and_warm() {
         pool.request(p.clone(), mtime_of(p), ThumbSize::Normal);
     }
     for _ in 0..COUNT {
-        assert!(rx.recv().unwrap().1.is_some());
+        assert!(rx.recv().unwrap().2.is_some());
     }
     let wall = t.elapsed().as_secs_f64();
     println!("cold, 2 threads, Normal: {:.2} s for {COUNT} ({:.1} ms/image wall)", wall, wall * 1e3 / COUNT as f64);

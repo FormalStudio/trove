@@ -202,6 +202,10 @@ impl Shared {
     }
 }
 
+/// A thumbnail the pool answered: the file, the size asked for, and where the thumbnail is, or
+/// `None` when none could be made.
+pub type Made = (PathBuf, ThumbSize, Option<PathBuf>);
+
 /// A bounded pool making thumbnails, newest request first: the rows on screen now are the ones
 /// asked for last.
 pub struct Thumbnails {
@@ -210,11 +214,11 @@ pub struct Thumbnails {
 
 impl Thumbnails {
     /// A pool over the real environment's caches. `threads` is clamped to at least 1.
-    pub fn new(threads: usize) -> (Self, flume::Receiver<(PathBuf, Option<PathBuf>)>) {
+    pub fn new(threads: usize) -> (Self, flume::Receiver<Made>) {
         Self::with_engine(Engine::global(), threads)
     }
 
-    pub fn with_engine(engine: Arc<Engine>, threads: usize) -> (Self, flume::Receiver<(PathBuf, Option<PathBuf>)>) {
+    pub fn with_engine(engine: Arc<Engine>, threads: usize) -> (Self, flume::Receiver<Made>) {
         let (tx, rx) = flume::unbounded();
         let shared = Arc::new(Shared { state: Mutex::new(State::default()), wake: Condvar::new() });
         for i in 0..threads.max(1) {
@@ -273,7 +277,7 @@ impl Drop for Thumbnails {
     }
 }
 
-fn worker(shared: &Shared, engine: &Engine, tx: &flume::Sender<(PathBuf, Option<PathBuf>)>) {
+fn worker(shared: &Shared, engine: &Engine, tx: &flume::Sender<Made>) {
     lower_priority();
     loop {
         let job = {
@@ -293,7 +297,7 @@ fn worker(shared: &Shared, engine: &Engine, tx: &flume::Sender<(PathBuf, Option<
         };
         let result = thumbnail(engine, &job.path, job.mtime, job.size);
         shared.lock().running.remove(&(job.path.clone(), job.size));
-        if tx.send((job.path, result)).is_err() {
+        if tx.send((job.path, job.size, result)).is_err() {
             return;
         }
     }

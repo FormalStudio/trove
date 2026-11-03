@@ -1,5 +1,5 @@
-//! The commands of the preview, Quick Look, search results and the columns view, their keys,
-//! and the window's handlers for them.
+//! The commands of the preview, Quick Look, search results, the columns view and the views'
+//! zoom, their keys, and the window's handlers for them.
 
 use std::path::Path;
 
@@ -9,6 +9,7 @@ use crate::actions::{FILES, SEARCH, WINDOW};
 use crate::location::Location;
 use crate::root::Root;
 use crate::tab::View;
+use crate::zoom::Zoom;
 
 actions!(
     trove,
@@ -20,7 +21,10 @@ actions!(
         QuickLookNext,
         QuickLookPrevious,
         CloseQuickLook,
-        QuickLookOpen
+        QuickLookOpen,
+        ZoomIn,
+        ZoomOut,
+        ZoomReset
     ]
 );
 
@@ -47,6 +51,10 @@ pub fn bind(cx: &mut App) {
         KeyBinding::new("up", QuickLookPrevious, Some(QUICKLOOK)),
         KeyBinding::new("secondary-o", QuickLookOpen, Some(QUICKLOOK)),
         KeyBinding::new("enter", QuickLookOpen, Some(QUICKLOOK)),
+        KeyBinding::new("secondary-=", ZoomIn, Some(WINDOW)),
+        KeyBinding::new("secondary-+", ZoomIn, Some(WINDOW)),
+        KeyBinding::new("secondary--", ZoomOut, Some(WINDOW)),
+        KeyBinding::new("secondary-0", ZoomReset, Some(WINDOW)),
     ]);
 }
 
@@ -65,6 +73,9 @@ pub fn on_root(root: Scaffold, cx: &mut Context<Root>) -> Scaffold {
         tab.update(cx, |t, cx| show_in_folder(t, window, cx));
         this.focus_files(window, cx);
     }))
+    .on_action(cx.listener(|this, _: &ZoomIn, _, cx| zoom(this, |z, view| z.step(view, 1), cx)))
+    .on_action(cx.listener(|this, _: &ZoomOut, _, cx| zoom(this, |z, view| z.step(view, -1), cx)))
+    .on_action(cx.listener(|this, _: &ZoomReset, _, cx| zoom(this, Zoom::reset, cx)))
     .on_action(cx.listener(|this, _: &FocusResults, window, cx| {
         let tab = this.active_tab().clone();
         tab.update(cx, |t, cx| {
@@ -75,6 +86,28 @@ pub fn on_root(root: Scaffold, cx: &mut Context<Root>) -> Scaffold {
         });
         this.focus_files(window, cx);
     }))
+}
+
+/// Resizes the active tab's view, in every tab of the window, and keeps the size for the next
+/// launch.
+fn zoom(root: &mut Root, to: impl Fn(Zoom, View) -> Zoom, cx: &mut Context<Root>) {
+    let (now, view) = {
+        let tab = root.active_tab().read(cx);
+        (tab.zoom(), tab.view())
+    };
+    let next = to(now, view);
+    if next == now {
+        return;
+    }
+    for tab in root.tabs() {
+        tab.update(cx, |t, cx| t.set_zoom(next, cx));
+    }
+    if next.list != now.list {
+        crate::settings::set(cx, "list_zoom", &next.list);
+    }
+    if next.grid != now.grid {
+        crate::settings::set(cx, "grid_zoom", &next.grid);
+    }
 }
 
 /// "Show in enclosing folder": the result's folder, with the result selected.

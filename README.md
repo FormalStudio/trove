@@ -103,6 +103,8 @@ default_view = "list"     # or "grid"
 single_click = false
 confirm_trash = false
 network_thumbnails = false
+list_zoom = 0             # 0 to 2, Ctrl+= and Ctrl+- in the list and columns views
+grid_zoom = 1             # 0 to 4, the same in the grid
 ```
 
 | Variable | Effect |
@@ -114,8 +116,8 @@ network_thumbnails = false
 
 The full table is in [docs/design.md](docs/design.md#keys). The ones to know: Enter opens,
 Backspace goes up, Space is Quick Look, F2 renames, Ctrl+F searches, Ctrl+L edits the path,
-Ctrl+H shows hidden files, Ctrl+1/2/3 switch view, Alt+1..9 switch tab. `Cmd` replaces `Ctrl`
-on macOS.
+Ctrl+H shows hidden files, Ctrl+1/2/3 switch view, Ctrl+= and Ctrl+- resize rows and tiles (Ctrl+0
+resets), Alt+1..9 switch tab. `Cmd` replaces `Ctrl` on macOS.
 
 ## Development
 

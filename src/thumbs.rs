@@ -11,10 +11,11 @@ use std::time::{Duration, SystemTime};
 
 use nd::prelude::*;
 use trove_fs::{Entry, EntryId, FileKind, Volume};
-use trove_preview::{Config, Engine, ThumbSize, Thumbnails};
+use trove_preview::{Config, Engine, Made, ThumbSize, Thumbnails};
 
 use crate::pump::pump;
 use crate::tab::Tab;
+use crate::zoom::{RowSize, TileSize};
 
 /// Half the cores, two to four: decoding is CPU bound, and the listing's stat pool and the
 /// window want the rest.
@@ -65,9 +66,9 @@ pub fn has_thumbnail(kind: FileKind) -> bool {
 
 pub struct Thumbs {
     pool: Thumbnails,
-    rx: flume::Receiver<(PathBuf, Option<PathBuf>)>,
-    done: HashMap<PathBuf, Option<PathBuf>>,
-    asked: HashSet<PathBuf>,
+    rx: flume::Receiver<Made>,
+    done: HashMap<(PathBuf, ThumbSize), Option<PathBuf>>,
+    asked: HashSet<(PathBuf, ThumbSize)>,
     arrivals: VecDeque<(u64, PathBuf)>,
     seq: u64,
     remote: HashMap<PathBuf, bool>,
@@ -103,19 +104,32 @@ pub fn get(cx: &mut App) -> Entity<Thumbs> {
 }
 
 impl Thumbs {
-    /// The thumbnail of `path` when it is made; otherwise asks for it once, if this kind can
-    /// have one and the folder is not on a network mount.
-    pub fn lookup(&mut self, path: &Path, kind: FileKind, mtime: Option<SystemTime>, network: bool) -> Option<PathBuf> {
-        if let Some(done) = self.done.get(path) {
-            return done.clone();
+    /// The thumbnail of `path` at `size` when it is made; otherwise asks for it once, if this
+    /// kind can have one and the folder is not on a network mount. A large one not made yet,
+    /// or that could not be made, gives way to a normal one already made.
+    pub fn lookup(
+        &mut self,
+        path: &Path,
+        kind: FileKind,
+        mtime: Option<SystemTime>,
+        network: bool,
+        size: ThumbSize,
+    ) -> Option<PathBuf> {
+        let key = (path.to_path_buf(), size);
+        let smaller = match size {
+            ThumbSize::Large => self.done.get(&(key.0.clone(), ThumbSize::Normal)).cloned().flatten(),
+            ThumbSize::Normal => None,
+        };
+        if let Some(done) = self.done.get(&key) {
+            return done.clone().or(smaller);
         }
-        if !has_thumbnail(kind) || self.asked.contains(path) || !(network || self.local(path)) {
-            return None;
+        if !has_thumbnail(kind) || self.asked.contains(&key) || !(network || self.local(path)) {
+            return smaller;
         }
-        let mtime = mtime?;
-        self.asked.insert(path.to_path_buf());
-        self.pool.request(path.to_path_buf(), mtime, ThumbSize::Normal);
-        None
+        let Some(mtime) = mtime else { return smaller };
+        self.asked.insert(key);
+        self.pool.request(path.to_path_buf(), mtime, size);
+        smaller
     }
 
     fn local(&mut self, path: &Path) -> bool {
@@ -137,12 +151,13 @@ impl Thumbs {
         self.remote.clear();
     }
 
-    fn arrive(&mut self, batch: Vec<(PathBuf, Option<PathBuf>)>, cx: &mut Context<Self>) {
-        for (path, thumb) in batch {
-            self.asked.remove(&path);
+    fn arrive(&mut self, batch: Vec<Made>, cx: &mut Context<Self>) {
+        for (path, size, thumb) in batch {
+            let key = (path, size);
+            self.asked.remove(&key);
             self.seq += 1;
-            self.arrivals.push_back((self.seq, path.clone()));
-            self.done.insert(path, thumb);
+            self.arrivals.push_back((self.seq, key.0.clone()));
+            self.done.insert(key, thumb);
         }
         if self.asked.is_empty() {
             crate::trace::mark("thumbnails idle");
@@ -177,29 +192,30 @@ impl Thumbs {
 }
 
 /// The thumbnail of a listed file once it is made, asked for the first time a row or tile
-/// showing it is drawn.
-pub fn for_entry(path: Option<PathBuf>, e: &Entry, cx: &mut App) -> Option<PathBuf> {
+/// showing it at a picture `long_side` points across is drawn.
+pub fn for_entry(path: Option<PathBuf>, e: &Entry, long_side: f32, cx: &mut App) -> Option<PathBuf> {
     let mtime = e.meta.as_ref().and_then(|m| m.modified);
+    let size = crate::zoom::thumb_size(long_side);
     path.and_then(|p| {
         let network = crate::settings::get(cx).network_thumbnails;
         let thumbs = get(cx);
-        thumbs.update(cx, |t, _| t.lookup(&p, e.file_kind, mtime, network))
+        thumbs.update(cx, |t, _| t.lookup(&p, e.file_kind, mtime, network, size))
     })
 }
 
 /// The picture of a grid tile: the thumbnail once it exists, the kind's icon until then.
-pub fn tile_art(path: Option<PathBuf>, e: &Entry, lit: bool, cx: &mut Context<Tab>) -> AnyElement {
-    let thumb = for_entry(path, e, cx);
+pub fn tile_art(path: Option<PathBuf>, e: &Entry, lit: bool, size: TileSize, cx: &mut Context<Tab>) -> AnyElement {
+    let thumb = for_entry(path, e, size.art.0.max(size.art.1), cx);
     let theme = cx.theme();
     let art = match thumb {
         Some(thumb) => image(ImageSource::path(&thumb))
             .contain()
-            .w(px(ART.0))
-            .h(px(ART.1))
+            .w(px(size.art.0))
+            .h(px(size.art.1))
             .rounded(theme.radius.sm)
             .alt(e.name.to_string())
             .into_any_element(),
-        None => icon(crate::icons::for_kind(e.file_kind), 48.)
+        None => icon(crate::icons::for_kind(e.file_kind), size.glyph)
             .text_color(crate::icons::tint(e.file_kind, theme))
             .into_any_element(),
     };
@@ -212,35 +228,33 @@ pub fn tile_art(path: Option<PathBuf>, e: &Entry, lit: bool, cx: &mut Context<Ta
 }
 
 /// The picture at the head of a list row: the thumbnail in the glyph's box once it exists.
-pub fn row_art(thumb: Option<PathBuf>, glyph: Icon, tint: Hsla, theme: &Theme) -> AnyElement {
+pub fn row_art(thumb: Option<PathBuf>, glyph: Icon, tint: Hsla, size: RowSize, theme: &Theme) -> AnyElement {
     let art = match thumb {
         Some(thumb) => {
-            image(ImageSource::path(&thumb)).contain().size(px(ROW_ART)).rounded(theme.radius.sm).into_any_element()
+            image(ImageSource::path(&thumb)).contain().size(px(size.art)).rounded(theme.radius.sm).into_any_element()
         }
-        None => icon(glyph, 16.).text_color(tint).into_any_element(),
+        None => icon(glyph, size.glyph).text_color(tint).into_any_element(),
     };
-    div().size(px(ROW_ART)).flex_none().flex().items_center().justify_center().child(art).into_any_element()
+    div().size(px(size.art)).flex_none().flex().items_center().justify_center().child(art).into_any_element()
 }
-
-/// The box a list row's picture takes.
-const ROW_ART: f32 = 20.;
-
-/// The box a tile's picture takes inside the tile.
-const ART: (f32, f32) = (88., 60.);
 
 /// Bumps the tiles whose thumbnail arrived since the tab last looked.
 pub fn arrived(tab: &mut Tab, thumbs: &Entity<Thumbs>, cx: &mut Context<Tab>) {
     let (paths, seq) = thumbs.read(cx).since(tab.extras.thumbs_seen);
     tab.extras.thumbs_seen = seq;
+    tab.extras.columns.thumbnails_arrived(&paths, cx);
     let ids: Vec<EntryId> = paths.iter().filter_map(|p| tab.id_of_path(p)).collect();
     if !ids.is_empty() {
         tab.bump_ids(&ids, cx);
     }
 }
 
-/// The thumbnail made for `path`, if one was.
+/// The thumbnail made for `path`, normal size first, if one was.
 pub fn thumbnail(cx: &App, path: &Path) -> Option<PathBuf> {
-    cx.try_global::<Shared>()?.0.read(cx).done.get(path).cloned().flatten()
+    let done = &cx.try_global::<Shared>()?.0.read(cx).done;
+    [ThumbSize::Normal, ThumbSize::Large]
+        .into_iter()
+        .find_map(|size| done.get(&(path.to_path_buf(), size)).cloned().flatten())
 }
 
 /// Waits up to `timeout` for every thumbnail asked for: the host's pump, for tests.

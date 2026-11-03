@@ -18,10 +18,14 @@ use crate::icons;
 use crate::location::Location;
 use crate::preview::{Item, Preview};
 use crate::pump::pump;
-use crate::tab::{ROW_HEIGHT, Tab};
+use crate::tab::Tab;
+use crate::zoom::{ROWS, RowSize};
 
 const COLUMN_W: f32 = 220.;
 const PREVIEW_MIN: f32 = 280.;
+/// The preview column's content, centred in whatever room is left: a wide window does not
+/// stretch its information rows apart.
+const PREVIEW_MAX: f32 = 420.;
 /// The tab's own column.
 pub const CURRENT: &str = "files-columns";
 /// The folder under the cursor.
@@ -54,7 +58,7 @@ struct Level {
 impl Columns {
     pub fn new<T: 'static>(cx: &mut Context<T>) -> Self {
         Self {
-            current: ListState::new(cx).estimated_row_height(px(ROW_HEIGHT)),
+            current: ListState::new(cx).estimated_row_height(px(ROWS[0].height)),
             levels: Vec::new(),
             child: None,
             preview: None,
@@ -91,6 +95,26 @@ impl Columns {
 
     fn level_mut(&mut self, dir: &Path) -> Option<&mut Level> {
         self.levels.iter_mut().chain(self.child.as_mut()).find(|l| &*l.dir == dir)
+    }
+
+    /// Redraws every row of every column: the rows changed size.
+    pub fn invalidate_all(&mut self, cx: &mut App) {
+        self.current.invalidate_all(cx);
+        for level in self.levels.iter_mut().chain(self.child.as_mut()) {
+            level.list.invalidate_all(cx);
+        }
+    }
+
+    /// Redraws the rows of the columns above and below the tab's own whose thumbnail arrived;
+    /// the tab's own column is the tab's listing, which redraws its own.
+    pub fn thumbnails_arrived(&mut self, paths: &[PathBuf], cx: &mut App) {
+        for path in paths {
+            let (Some(dir), Some(name)) = (path.parent(), path.file_name()) else { continue };
+            let id = id_of(name);
+            if let Some(level) = self.level_mut(dir).filter(|l| l.index.contains_key(&id)) {
+                level.list.invalidate(&id, cx);
+            }
+        }
     }
 
     /// Waits up to `timeout` for every column's listing: the host's pump, for tests.
@@ -134,7 +158,7 @@ impl Level {
             dir,
             entries: Vec::new(),
             index: HashMap::new(),
-            list: ListState::new(cx).estimated_row_height(px(ROW_HEIGHT)),
+            list: ListState::new(cx).estimated_row_height(px(ROWS[0].height)),
             events: Some(events),
             _listing: Some(listing),
             on_path: None,
@@ -288,17 +312,17 @@ pub fn step(tab: &mut Tab, by: isize, cx: &mut Context<Tab>) {
     }
 }
 
-/// A row of any column: icon, name, and a chevron for folders.
-fn row(e: &Entry, theme: &Theme) -> Div {
+/// A row of any column: picture, name, and a chevron for folders.
+fn row(e: &Entry, thumb: Option<PathBuf>, size: RowSize, theme: &Theme) -> Div {
     let symlinked = matches!(e.kind, EntryKind::Symlink { .. }) && e.is_dir();
     let glyph = if symlinked { icons::symlinked_folder() } else { icons::for_kind(e.file_kind) };
     h_flex()
-        .h(px(ROW_HEIGHT))
+        .h(px(size.height))
         .px(theme.spacing.sm)
         .gap(theme.spacing.sm)
         .items_center()
         .min_w_0()
-        .child(icon(glyph, 16.).text_color(icons::tint(e.file_kind, theme)))
+        .child(crate::thumbs::row_art(thumb, glyph, icons::tint(e.file_kind, theme), size, theme))
         .child(
             div()
                 .flex_1()
@@ -315,19 +339,38 @@ impl Tab {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let theme = cx.theme();
+        let size = self.row_size();
         let columns = &self.extras.columns;
-        let entry = columns.level(&dir).and_then(|l| l.index.get(&id).and_then(|i| l.entries.get(*i)));
-        match entry {
-            Some(e) => row(e, theme).into_any_element(),
-            None => div().into_any_element(),
+        let Some(e) = columns.level(&dir).and_then(|l| l.index.get(&id).and_then(|i| l.entries.get(*i))).cloned()
+        else {
+            return div().into_any_element();
+        };
+        let path = e.path_in(&dir);
+        let thumb = crate::thumbs::for_entry(Some(path.clone()), &e, size.art, cx);
+        let r = row(&e, thumb, size, cx.theme());
+        if e.is_dir() {
+            return r.into_any_element();
         }
+        let me = cx.weak_entity();
+        r.on_tap(move |tap: &TapEvent, window, cx| {
+            let opens = me.update(cx, |t, cx| t.single_click(tap, window, cx)).unwrap_or(false);
+            if opens {
+                crate::keys::open_file(&path, window, cx);
+            }
+        })
+        .into_any_element()
     }
 
     fn current_row(&mut self, id: EntryId, _window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
-        let theme = cx.theme();
+        if let Some(r) = self.renaming().filter(|r| r.id == id).cloned() {
+            return self.rename_field(&r, false, cx);
+        }
+        let size = self.row_size();
+        let path = self.path_of(&id);
         let Some(e) = self.entry(&id) else { return div().into_any_element() };
-        let r = row(e, theme);
+        let thumb = crate::thumbs::for_entry(path, e, size.art, cx);
+        let r =
+            row(e, thumb, size, cx.theme()).id(crate::tab::row_id(&e.name)).when(self.is_cut(&id), |d| d.opacity(0.5));
         self.file_events(r, id, cx).into_any_element()
     }
 }
@@ -395,6 +438,9 @@ pub fn render(tab: &mut Tab, cx: &mut Context<Tab>) -> AnyElement {
             .on_activate(move |e: &ActivateEvent<EntryId>, window, cx| {
                 let key = e.key;
                 let _ = act.update(cx, |t, cx| {
+                    if t.second_press(window) {
+                        return;
+                    }
                     let Some((path, is_dir)) = t.extras.columns.path_in(&dir_of_act, key) else { return };
                     if is_dir {
                         t.navigate(Location::Dir(path), window, cx);
@@ -420,6 +466,7 @@ pub fn render(tab: &mut Tab, cx: &mut Context<Tab>) -> AnyElement {
     if file.is_some()
         && let Some(preview) = &tab.extras.columns.preview
     {
+        let resized = preview.downgrade();
         row_items.push(
             div()
                 .id(PREVIEW_ID)
@@ -427,7 +474,19 @@ pub fn render(tab: &mut Tab, cx: &mut Context<Tab>) -> AnyElement {
                 .flex_shrink_0()
                 .min_w(px(PREVIEW_MIN))
                 .h_full()
-                .child(preview.clone())
+                .flex()
+                .justify_center()
+                .child(
+                    div()
+                        .id("column-preview-body")
+                        .w_full()
+                        .max_w(px(PREVIEW_MAX))
+                        .h_full()
+                        .on_resize(move |r, _, cx| {
+                            let _ = resized.update(cx, |p, cx| p.set_width(r.width, cx));
+                        })
+                        .child(preview.clone()),
+                )
                 .into_any_element(),
         );
     }

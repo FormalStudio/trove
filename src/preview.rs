@@ -443,7 +443,7 @@ impl Render for Preview {
                     .child(info_section(item, &self.loaded, &today, cx))
             }
         };
-        v_flex().id("preview").size_full().overflow_y_scroll().p(theme.spacing.lg).pt(theme.spacing.xl).child(body)
+        v_flex().id("preview").size_full().overflow_y_scroll().p(theme.spacing.lg).child(body)
     }
 }
 
@@ -587,16 +587,11 @@ pub fn art(
     }
 }
 
-/// Finder's information rows.
+/// Finder's information rows, less what the subtitle above them already says (the kind, the
+/// size, a folder's count).
 pub fn info_rows(item: &Item, loaded: &Loaded, today: &Today) -> Vec<(&'static str, String)> {
     let mut rows = Vec::new();
-    rows.push(("Kind", item.kind.label().to_owned()));
     if let Some(info) = &loaded.info {
-        if !info.is_dir {
-            rows.push(("Size", size_long(info.size)));
-        } else if let Some(Content::Folder { items, .. }) = &loaded.content {
-            rows.push(("Contains", format::items(*items as usize)));
-        }
         if let Some(Content::Audio { title, artist, album, duration, .. }) = &loaded.content {
             for (label, value) in [("Title", title), ("Artist", artist), ("Album", album)] {
                 if let Some(v) = value.as_ref().filter(|v| !v.is_empty()) {
@@ -616,7 +611,7 @@ pub fn info_rows(item: &Item, loaded: &Loaded, today: &Today) -> Vec<(&'static s
         if let Some(t) = info.modified {
             rows.push(("Modified", today.long(t)));
         }
-        rows.push(("Permissions", info.mode.clone()));
+        rows.push(("Permissions", info.access.label().to_owned()));
         let owner = if info.group.is_empty() || info.group == info.owner {
             info.owner.clone()
         } else {
@@ -649,7 +644,6 @@ pub fn info_section(item: &Item, loaded: &Loaded, today: &Today, cx: &App) -> Di
         )
         .child(separator())
         .children(rows.into_iter().map(|(label, value)| {
-            let mono = label == "Permissions";
             h_flex()
                 .w_full()
                 .gap(theme.spacing.sm)
@@ -663,25 +657,11 @@ pub fn info_section(item: &Item, loaded: &Loaded, today: &Today, cx: &App) -> Di
                 )
                 .child(
                     div().flex_1().min_w_0().flex().justify_end().child(
-                        text(value)
-                            .text_size(theme.type_scale.footnote)
-                            .tabular_nums()
-                            .text_right()
-                            .line_clamp(3)
-                            .when(mono, |t| t.font_family(theme.fonts.mono.family.clone())),
+                        text(value).text_size(theme.type_scale.footnote).tabular_nums().text_right().line_clamp(3),
                     ),
                 )
                 .into_any_element()
         }))
-}
-
-/// "1.2 MB (1 234 567 bytes)", Finder's size row.
-fn size_long(bytes: u64) -> String {
-    if bytes < 1000 {
-        format::size(bytes)
-    } else {
-        format!("{} ({} bytes)", format::size(bytes), format::group(bytes as usize))
-    }
 }
 
 pub fn duration_text(seconds: f64) -> String {

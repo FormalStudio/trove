@@ -32,6 +32,7 @@ mod tab;
 mod thumbs;
 mod trace;
 mod trash;
+pub mod zoom;
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -40,7 +41,7 @@ use nd::prelude::*;
 
 pub use location::Location;
 pub use root::{Root, Start};
-pub use tab::{Load, RENAME_FIELD, Rename, Tab, View, stem_chars};
+pub use tab::{Load, RENAME_FIELD, Rename, Tab, View, row_id, stem_chars};
 pub use trash::TrashInfo;
 
 pub use columns::Columns;

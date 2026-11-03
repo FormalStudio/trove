@@ -17,6 +17,8 @@ pub struct Info {
     pub accessed: Option<SystemTime>,
     /// `ls -l` style, e.g. `drwxr-xr-x`.
     pub mode: String,
+    /// What the user running this may do with it.
+    pub access: Access,
     pub owner: String,
     pub group: String,
     pub mime: String,
@@ -54,12 +56,47 @@ pub fn info_blocking(path: &Path) -> Option<Info> {
         created: target.created().ok(),
         accessed: target.accessed().ok(),
         mode: mode_string(&lstat),
+        access: access_of(path),
         owner: user_name(lstat.uid()),
         group: group_name(lstat.gid()),
         mime,
         link_target,
         dimensions,
     })
+}
+
+/// Whether the user running this may read and write a file, by `access(2)`, which also counts
+/// ACLs and a read-only mount.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Access {
+    ReadWrite,
+    ReadOnly,
+    WriteOnly,
+    None,
+}
+
+impl Access {
+    pub fn label(self) -> &'static str {
+        match self {
+            Access::ReadWrite => "Read and write",
+            Access::ReadOnly => "Read only",
+            Access::WriteOnly => "Write only",
+            Access::None => "No access",
+        }
+    }
+}
+
+fn access_of(path: &Path) -> Access {
+    use std::os::unix::ffi::OsStrExt;
+    let Ok(c) = std::ffi::CString::new(path.as_os_str().as_bytes()) else { return Access::None };
+    // SAFETY: `c` is a NUL-terminated path that outlives both calls.
+    let can = |mode| unsafe { libc::access(c.as_ptr(), mode) } == 0;
+    match (can(libc::R_OK), can(libc::W_OK)) {
+        (true, true) => Access::ReadWrite,
+        (true, false) => Access::ReadOnly,
+        (false, true) => Access::WriteOnly,
+        (false, false) => Access::None,
+    }
 }
 
 pub(crate) fn mode_string(m: &Metadata) -> String {

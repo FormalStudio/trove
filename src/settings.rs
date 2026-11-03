@@ -23,6 +23,10 @@ pub struct TroveSettings {
     pub confirm_trash: bool,
     /// Make thumbnails for files on network mounts, which reads every file over the network.
     pub network_thumbnails: bool,
+    /// Row size in the list and columns views, 0 to 2 (Ctrl+= and Ctrl+- there).
+    pub list_zoom: u8,
+    /// Tile size in the grid view, 0 to 4 (Ctrl+= and Ctrl+- there).
+    pub grid_zoom: u8,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -42,6 +46,8 @@ impl Default for TroveSettings {
             single_click: false,
             confirm_trash: false,
             network_thumbnails: false,
+            list_zoom: 0,
+            grid_zoom: crate::zoom::GRID_DEFAULT as u8,
         }
     }
 }

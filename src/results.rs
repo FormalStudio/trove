@@ -22,6 +22,8 @@ use crate::tab::Tab;
 pub const MIN_CHARS: usize = 2;
 /// The results' table, which takes the keys while it shows.
 pub const TABLE: &str = "results-table";
+/// The scope row's switch between the folder and Home.
+pub const SCOPE_SWITCH: &str = "search-scope-switch";
 const LIMIT: usize = 500;
 /// Rows whose modification time is looked up for each answer: the first screenfuls.
 const STAT_ROWS: usize = 400;
@@ -84,7 +86,7 @@ pub struct Results {
 impl Results {
     pub fn new<T: 'static>(cx: &mut Context<T>) -> Self {
         Self {
-            list: ListState::new(cx).estimated_row_height(px(crate::tab::ROW_HEIGHT)),
+            list: ListState::new(cx).estimated_row_height(px(crate::zoom::ROWS[0].height)),
             rows: Vec::new(),
             by_id: HashMap::new(),
             query: String::new(),
@@ -539,6 +541,7 @@ fn plain(s: &str, hidden: bool) -> Span {
 
 impl Tab {
     fn result_cell(&mut self, (id, col): (EntryId, usize), _window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let size = self.row_size();
         let theme = cx.theme();
         let Some(row) = self.extras.results.by_id.get(&id) else { return div().into_any_element() };
         let quiet = |s: String| {
@@ -553,7 +556,13 @@ impl Tab {
             0 => h_flex()
                 .gap(theme.spacing.sm)
                 .min_w_0()
-                .child(icon(icons::for_kind(row.kind), 16.).text_color(icons::tint(row.kind, theme)))
+                .child(crate::thumbs::row_art(
+                    None,
+                    icons::for_kind(row.kind),
+                    icons::tint(row.kind, theme),
+                    size,
+                    theme,
+                ))
                 .child(
                     div()
                         .flex_1()
@@ -565,7 +574,7 @@ impl Tab {
             2 => quiet(row.kind.label().to_owned()),
             _ => quiet(row.modified.map(|t| self.today().modified(t)).unwrap_or_default()),
         };
-        let row = h_flex().h(px(crate::tab::ROW_HEIGHT)).px(theme.spacing.sm).items_center().child(content);
+        let row = h_flex().h(px(size.height)).px(theme.spacing.sm).items_center().child(content);
         self.file_events(row, id, cx).into_any_element()
     }
 }
@@ -585,27 +594,26 @@ pub fn render(tab: &mut Tab, width: f32, cx: &mut Context<Tab>) -> AnyElement {
     let scope_dir = scope_dir(tab);
     let state = state_line(&scope_dir, &home, r.done, &index, cx);
 
-    // Finder's scope row: the scope searched is the filled button, in light and dark alike.
     let switch = folder.map(|name| {
-        let scope_button = |id: &'static str, label: String, this: Scope| {
-            let to = me.clone();
-            let active = scope == this;
-            button(id, label)
-                .variant(if active { ButtonVariant::Accent } else { ButtonVariant::Standard })
-                .when(!active, |b| b.bezel(Bezel::Borderless))
-                .checked(active)
-                .on_click(move |_: &ClickEvent, _, cx| {
-                    let _ = to.update(cx, |t, cx| set_scope(t, this, cx));
-                })
-        };
+        let to = me.clone();
         h_flex()
             .id("search-scope")
-            .gap(theme.spacing.xs)
+            .gap(theme.spacing.sm)
             .items_center()
             .flex_shrink_0()
             .child(text("Search:").text_color(theme.text.secondary))
-            .child(scope_button("search-scope-folder", format!("This folder \u{201c}{name}\u{201d}"), Scope::Folder))
-            .child(scope_button("search-scope-home", "Home".to_owned(), Scope::Home))
+            .child(
+                segmented(SCOPE_SWITCH, [format!("This folder \u{201c}{name}\u{201d}"), "Home".to_owned()])
+                    .label("Search in")
+                    .selected(match scope {
+                        Scope::Folder => 0,
+                        Scope::Home => 1,
+                    })
+                    .on_change(move |e: &SelectChanged, _, cx| {
+                        let scope = if e.index == 0 { Scope::Folder } else { Scope::Home };
+                        let _ = to.update(cx, |t, cx| set_scope(t, scope, cx));
+                    }),
+            )
             .into_any_element()
     });
     let hint_open = r.hint;
@@ -662,7 +670,7 @@ pub fn render(tab: &mut Tab, width: f32, cx: &mut Context<Tab>) -> AnyElement {
         r.by_id.iter().filter(|(_, row)| row.is_dir).map(|(id, _)| *id).collect();
     let table = table(TABLE, &r.list, columns(width), move |id, col, w, cx| cell((id, col), w, cx))
         .selection(Selection::multiple())
-        .estimated_row_height(px(crate::tab::ROW_HEIGHT))
+        .estimated_row_height(px(tab.row_size().height))
         .on_selection_change(move |e: &SelectionChanged<EntryId>, _, cx| {
             let _ = sel.update(cx, |t, cx| {
                 t.extras.results.on_selection_change(e);
@@ -670,7 +678,7 @@ pub fn render(tab: &mut Tab, width: f32, cx: &mut Context<Tab>) -> AnyElement {
             });
         })
         .on_activate(move |e: &ActivateEvent<EntryId>, window, cx| {
-            let _ = act.update(cx, |t, cx| t.open(e.key, window, cx));
+            let _ = act.update(cx, |t, cx| t.activate(e.key, window, cx));
         })
         .drag_rows(crate::actions::DRAG_FILES, move |id| ids.get(id).cloned().unwrap_or_default())
         .accepts_drops([crate::actions::DRAG_FILES, DragItem::FILES])
