@@ -1369,9 +1369,10 @@ impl Render for Tab {
             window.focus(id);
         } else if was != target && was != crate::results::TABLE && target != crate::results::TABLE {
             // Another view, or a folder that failed, emptied or answered, put another list in
-            // place of the one with the keys. The results come and go as the search field is
-            // typed in, which keeps them; the window moves them there and back itself.
-            window.focus(target);
+            // place of the one with the keys; a field holding them (the picker's name) keeps
+            // them. The results come and go as the search field is typed in, which keeps them;
+            // the window moves them there and back itself.
+            window.focus_if_lost(target);
         }
         if self.names_traced != self.generation && !self.visible.is_empty() {
             self.names_traced = self.generation;
