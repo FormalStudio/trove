@@ -1,3 +1,5 @@
+#![allow(clippy::expect_used, clippy::unwrap_used)]
+
 //! Tier 1: the window on `TestBackend`, over the demo fixture. No window server; listings run
 //! on their real threads and each step drains them before reading.
 
