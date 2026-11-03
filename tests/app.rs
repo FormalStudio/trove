@@ -850,6 +850,40 @@ fn the_app_menu_holds_the_window_commands() {
 }
 
 #[test]
+fn preferences_reach_the_open_tabs_of_every_window() {
+    let mut h = Harness::new();
+    h.act(NewTab);
+    let other = h.cx.open_window(Size { width: 900., height: 600. }, |window, cx| {
+        cx.new(|cx| Root::new(trove::Start::Path(fixture().clone()), window, cx))
+    });
+    let prefs = trove::app_menu::open_preferences(&mut h.cx).expect("Preferences opens");
+    h.settle();
+    let control = |h: &mut Harness, test_id: &str| {
+        nd::test::by_test_id(&mut h.cx, prefs.id(), test_id)
+            .unwrap_or_else(|| panic!("no `{test_id}` in\n{}", h.cx.semantic_tree().snapshot()))
+            .id
+    };
+    let hidden = control(&mut h, "show_hidden");
+    h.cx.emit(hidden, nd::components::forms::Toggled { checked: true });
+    let zoom = control(&mut h, "list_zoom");
+    h.cx.emit(zoom, nd::components::forms::StepperChanged { value: 2. });
+    h.settle();
+    other.root().clone().update(&mut h.cx, |r, cx| r.drain(Duration::from_secs(5), cx));
+    h.cx.run_until_idle();
+
+    let tabs: Vec<Entity<Tab>> =
+        [h.root(), other.root().clone()].iter().flat_map(|root| root.read(&h.cx).tabs()).collect();
+    assert_eq!(tabs.len(), 3);
+    for tab in &tabs {
+        let t = tab.read(&h.cx);
+        assert!(t.show_hidden(), "hidden files show in {:?}", t.location());
+        assert_eq!(t.zoom().row(), trove::zoom::ROWS[2], "rows at the largest size in {:?}", t.location());
+    }
+    assert!(h.names().contains(&".bashrc".to_owned()), "the listing shows them: {:?}", h.names());
+    assert!(h.root().read(&h.cx).shows_hidden(), "and the menu ticks Show hidden files");
+}
+
+#[test]
 fn the_shortcuts_sheet_reads_the_bindings() {
     let mut h = Harness::new();
     let groups = trove::app_menu::shortcuts(&h.cx);

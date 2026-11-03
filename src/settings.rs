@@ -4,7 +4,7 @@
 use std::sync::Arc;
 
 use nd::prelude::*;
-use nd::settings::{Options, SettingsHandle};
+use nd::settings::{Event, Options, SettingsHandle, WatchGuard};
 use serde::{Deserialize, Serialize};
 
 #[derive(Settings, Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -52,12 +52,21 @@ impl Default for TroveSettings {
     }
 }
 
+/// Notified after every change to the settings, from Preferences, a shortcut or the file edited
+/// by hand, so each window brings its open tabs up to date.
+pub struct Changes;
+
 struct Loaded {
     handle: Option<SettingsHandle<TroveSettings>>,
     fallback: Arc<TroveSettings>,
+    changes: Entity<Changes>,
+    /// The handle's change reports, which the file watcher sends from its own thread.
+    reports: flume::Receiver<()>,
+    _watch: Option<WatchGuard>,
 }
 
-/// Reads the settings once; a file that does not load leaves the defaults in force.
+/// Reads the settings and watches their files; a file that does not load leaves the defaults
+/// in force.
 pub fn init(cx: &mut App) {
     if cx.has_global::<Loaded>() {
         return;
@@ -74,10 +83,39 @@ pub fn init(cx: &mut App) {
             None
         }
     };
+    let (tx, reports) = flume::unbounded();
+    let mut watch = None;
     if let Some(h) = &handle {
         nd::components::forms::settings::provide(cx, h.clone());
+        h.on_event(move |e| {
+            if matches!(e, Event::Changed(_)) {
+                let _ = tx.send(());
+            }
+        });
+        watch = h.watch().map_err(|e| eprintln!("trove: settings: not watched: {e}")).ok();
     }
-    cx.set_global(Loaded { handle, fallback: Arc::new(TroveSettings::default()) });
+    let changes = cx.new(|_| Changes);
+    crate::pump::pump(reports.clone(), changes.downgrade(), |_, _, cx| {
+        cx.notify();
+        true
+    });
+    cx.set_global(Loaded { handle, fallback: Arc::new(TroveSettings::default()), changes, reports, _watch: watch });
+}
+
+/// What to observe for changes to the settings.
+pub fn changes(cx: &App) -> Option<Entity<Changes>> {
+    cx.try_global::<Loaded>().map(|l| l.changes.clone())
+}
+
+/// Delivers the changes waiting where no host runs to pump them (tier 1 tests). Returns
+/// whether there were any.
+pub fn drain(cx: &mut App) -> bool {
+    let Some(l) = cx.try_global::<Loaded>() else { return false };
+    if l.reports.try_iter().count() == 0 {
+        return false;
+    }
+    l.changes.clone().update(cx, |_, cx| cx.notify());
+    true
 }
 
 pub fn get(cx: &App) -> Arc<TroveSettings> {

@@ -102,6 +102,7 @@ pub struct Root {
     _watch: Option<Subscription>,
     _volumes: Subscription,
     _picker: Option<Subscription>,
+    _settings: Option<Subscription>,
 }
 
 impl Root {
@@ -174,6 +175,8 @@ impl Root {
             _watch: None,
             _volumes: volumes,
             _picker: None,
+            _settings: crate::settings::changes(cx)
+                .map(|changes| cx.observe(&changes, |this: &mut Root, _, cx| this.apply_settings(cx))),
         };
         let view = match prefs.default_view {
             crate::settings::DefaultView::List => View::List,
@@ -301,7 +304,7 @@ impl Root {
     /// host's pump, for tests and the appearance audit, which run none.
     pub fn drain(&mut self, timeout: std::time::Duration, cx: &mut Context<Self>) {
         loop {
-            let ran = crate::ops::run_deferred(cx);
+            let ran = crate::ops::run_deferred(cx) | crate::settings::drain(cx);
             let jobs = crate::ops::jobs(cx);
             let moved = jobs.update(cx, |j, cx| j.drain(timeout, cx));
             for (_, tab) in &self.tabs {
@@ -328,10 +331,7 @@ impl Root {
         let tab = cx.new(|cx| {
             let mut t = Tab::new(location, show_hidden, view, cx);
             t.set_window(window);
-            if !folders_first {
-                let sort = trove_fs::SortOrder { folders_first, ..t.sort() };
-                t.set_sort(sort, cx);
-            }
+            t.set_folders_first(folders_first, cx);
             if let Some(shown) = shown {
                 t.set_pick(shown, cx);
             }
@@ -503,6 +503,22 @@ impl Root {
                 t.open(id, window, cx);
             }
         });
+    }
+
+    /// Brings every tab up to the settings after a change made anywhere: this window, another
+    /// one, Preferences or the file.
+    fn apply_settings(&mut self, cx: &mut Context<Self>) {
+        let prefs = crate::settings::get(cx);
+        let zoom = crate::zoom::Zoom::of(&prefs);
+        self.show_hidden = prefs.show_hidden;
+        for (_, tab) in &self.tabs {
+            tab.update(cx, |t, cx| {
+                t.set_show_hidden(prefs.show_hidden, cx);
+                t.set_folders_first(prefs.folders_first, cx);
+                t.set_zoom(zoom, cx);
+            });
+        }
+        cx.notify();
     }
 
     fn toggle_hidden(&mut self, _: &ToggleHidden, _: &mut Window, cx: &mut Context<Self>) {

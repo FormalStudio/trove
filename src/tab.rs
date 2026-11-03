@@ -797,6 +797,19 @@ impl Tab {
         });
     }
 
+    /// Folders before files in a folder's sort, or mixed in. Recent keeps its date order.
+    pub fn set_folders_first(&mut self, on: bool, cx: &mut Context<Self>) {
+        if self.sort.folders_first == on {
+            return;
+        }
+        let sort = SortOrder { folders_first: on, ..self.sort };
+        if self.location == Location::Recent {
+            self.sort = sort;
+        } else {
+            self.set_sort(sort, cx);
+        }
+    }
+
     fn on_sort(&mut self, e: &SortChanged, cx: &mut Context<Self>) {
         let key = match e.column.as_ref() {
             "size" => SortKey::Size,
@@ -805,7 +818,7 @@ impl Tab {
             _ => SortKey::Name,
         };
         let ascending = e.direction == SortDirection::Ascending;
-        let folders_first = self.location != Location::Recent;
+        let folders_first = self.location != Location::Recent && self.sort.folders_first;
         self.set_sort(SortOrder { key, ascending, folders_first }, cx);
     }
 

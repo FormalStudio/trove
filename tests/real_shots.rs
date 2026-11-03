@@ -256,7 +256,8 @@ fn real_sheet_shots() {
 }
 
 /// The window chrome, dark and light, in `artifacts/shots/chrome/`: one tab, three tabs, Quick
-/// Look over them, the app menu, Preferences and the keyboard shortcuts.
+/// Look over them, the app menu, Preferences at its size and dragged narrow, and the keyboard
+/// shortcuts.
 #[test]
 fn real_chrome_shots() {
     if !real_allowed() {
@@ -323,6 +324,10 @@ fn real_chrome_shots() {
 
         keys("ctrl-,", 1200);
         grab("preferences");
+        // Dragged to its narrowest: help wraps under each row and no control runs off the edge.
+        compositor.request("dispatch hl.dsp.window.resize({ x = 360, y = 640 })").unwrap();
+        std::thread::sleep(Duration::from_millis(800));
+        grab("preferences-narrow");
         drop(app);
     }
 }
