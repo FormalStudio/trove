@@ -15,6 +15,8 @@ mod location;
 mod menus;
 pub mod ops;
 mod pathbar;
+pub mod picker;
+pub mod portal;
 mod preview;
 mod pump;
 mod quicklook;
@@ -75,6 +77,24 @@ pub fn open(cx: &mut App, start: Start) -> WindowHandle<Root> {
     window
 }
 
+/// A window picking files for another app; `done` gets the outcome once, when the user
+/// accepts or cancels.
+pub fn open_picker(
+    cx: &mut App,
+    request: picker::Request,
+    done: impl FnOnce(picker::Outcome, &mut App) + 'static,
+) -> WindowHandle<Root> {
+    init(cx);
+    let options = WindowOptions::main("picker")
+        .title(request.window_title())
+        .size(size(px(960.), px(620.)))
+        .min_size(size(px(640.), px(400.)));
+    let done: picker::Done = Box::new(done);
+    let window = cx.open_window(options, move |window, cx| cx.new(|cx| Root::picking(request, done, window, cx)));
+    focus_listing(window.clone(), 30);
+    window
+}
+
 /// Gives the listing the keys once the window's first frames have mounted it: a focus asked
 /// for while the window is being built finds nothing to land on yet.
 fn focus_listing(window: WindowHandle<Root>, tries: u8) {
@@ -82,7 +102,7 @@ fn focus_listing(window: WindowHandle<Root>, tries: u8) {
         return;
     }
     nd::system::spawn(async {}, move |_, cx| {
-        let target = window.root().read(cx).active_tab().read(cx).focus_target();
+        let target = window.root().read(cx).first_focus(cx);
         if !cx.focus_id(window.id(), target) {
             focus_listing(window, tries - 1);
         }
@@ -111,6 +131,25 @@ pub fn open_conflict_demo(cx: &mut App) -> nd::core::WindowId {
     let sheet = conflict::open(cx, parent.id(), ask);
     ops::run_deferred(cx);
     sheet.id()
+}
+
+/// A save picker over the demo fixture, for the appearance audit: the name field, the filter
+/// and the buttons under the listing.
+pub fn open_picker_demo(cx: &mut App) -> nd::core::WindowId {
+    let root = demo_root();
+    let mut folder = root.join("Documents").into_os_string().into_encoded_bytes();
+    folder.push(0);
+    let filter = |name: &str, glob: &str| picker::Filter { name: name.into(), patterns: vec![(0, glob.into())] };
+    let request = picker::Request {
+        mode: picker::Mode::Save,
+        current_folder: Some(folder),
+        current_name: Some("Notes.md".into()),
+        filters: vec![filter("Markdown", "*.md"), filter("All files", "*")],
+        ..picker::Request::default()
+    };
+    let window = open_picker(cx, request, |_, _| {});
+    window.root().clone().update(cx, |r, cx| r.drain(Duration::from_secs(5), cx));
+    window.id()
 }
 
 /// Writes the demo fixture and makes it the home, Recent and places for this process; returns
@@ -182,6 +221,17 @@ fn arg_path(arg: std::ffi::OsString) -> PathBuf {
 }
 
 pub fn run() -> nd::Result<()> {
+    match std::env::args_os().nth(1).as_deref().and_then(|a| a.to_str()) {
+        Some("--pick") => return run_picker(),
+        Some("--portal") => {
+            if let Err(e) = portal::run() {
+                eprintln!("trove: portal: {e}");
+                std::process::exit(1);
+            }
+            return Ok(());
+        }
+        _ => {}
+    }
     trace::init();
     pump::set_live();
     let start = match std::env::args_os().nth(1) {
@@ -190,6 +240,42 @@ pub fn run() -> nd::Result<()> {
     };
     app().run(move |cx| {
         open(cx, start.clone());
+    })
+}
+
+/// `trove --pick`: the request as JSON on stdin, the outcome as one JSON line on stdout.
+fn run_picker() -> nd::Result<()> {
+    use std::io::{Read, Write};
+    let mut input = Vec::new();
+    let request = std::io::stdin()
+        .read_to_end(&mut input)
+        .map_err(|e| e.to_string())
+        .and_then(|_| serde_json::from_slice::<picker::Request>(&input).map_err(|e| e.to_string()));
+    let request = match request {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("trove: reading the pick request: {e}");
+            std::process::exit(2);
+        }
+    };
+    trace::init();
+    pump::set_live();
+    app().run(move |cx| {
+        let window = std::rc::Rc::new(std::cell::Cell::new(None));
+        let id = window.clone();
+        let handle = open_picker(cx, request, move |outcome, cx| {
+            let mut out = std::io::stdout().lock();
+            let written = serde_json::to_string(&outcome)
+                .map_err(std::io::Error::other)
+                .and_then(|line| writeln!(out, "{line}").and_then(|_| out.flush()));
+            if let Err(e) = written {
+                eprintln!("trove: answering the pick: {e}");
+            }
+            if let Some(id) = id.get() {
+                cx.close_window(id);
+            }
+        });
+        window.set(Some(handle.id()));
     })
 }
 

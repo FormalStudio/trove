@@ -68,6 +68,27 @@ install -Dm644 packaging/linux/dev.formalsnake.trove.png ~/.local/share/icons/hi
 `trove %U` takes paths and `file://` URIs, so the desktop entry can be the default handler for
 `inode/directory`: `xdg-mime default dev.formalsnake.trove.desktop inode/directory`.
 
+### As the system file chooser
+
+`trove --portal` is a D-Bus service: xdg-desktop-portal's FileChooser backend, so apps' Open
+and Save dialogs open a Trove window, and `org.freedesktop.FileManager1`, so "Show in folder"
+in a browser opens Trove with the file selected. D-Bus starts it on demand. To install it next
+to the binary above:
+
+```sh
+mkdir -p ~/.local/share/dbus-1/services
+for name in org.freedesktop.impl.portal.desktop.trove org.freedesktop.FileManager1; do
+  sed "s|/usr/bin/trove|$HOME/.local/bin/trove|" packaging/linux/$name.service \
+    > ~/.local/share/dbus-1/services/$name.service
+done
+install -Dm644 packaging/linux/trove.portal ~/.local/share/xdg-desktop-portal/portals/trove.portal
+```
+
+Then pick it for file choosing under `[preferred]` in your desktop's portals config (for
+Hyprland, `~/.config/xdg-desktop-portal/hyprland-portals.conf`, keeping its `default=` line):
+`org.freedesktop.impl.portal.FileChooser=trove`. xdg-desktop-portal reads its config when it
+starts, so log out and back in (or `systemctl --user restart xdg-desktop-portal`).
+
 `nd package linux` builds an AppImage into `target/nd/`. macOS (`nd package mac`) and Windows
 (`nd package windows`) builds come from the same source and are not published yet.
 

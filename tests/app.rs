@@ -366,3 +366,210 @@ fn ctrl_f_focuses_the_search_field() {
     let field = nd::test::by_test_id(&mut h.cx, window, "search").expect("a search field");
     assert!(field.focused, "{}", h.cx.semantic_tree().snapshot());
 }
+
+// Picker mode: the window another app's file chooser opens.
+
+mod picking {
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    use nd::chrome::services::{AlertCallback, Chrome, ChromeServices, OpenCallback, SaveCallback};
+    use nd::chrome::{Alert, AlertResponse, ContextMenu, Menu, OpenDialog, SaveDialog};
+    use nd::core::{NodeId, WindowId};
+    use trove::picker::{Filter, Mode, Outcome, PickAccept, PickCancel, Request};
+
+    use super::*;
+
+    /// A platform that keeps each alert's title and answers when the test says.
+    #[derive(Default)]
+    struct Alerts {
+        shown: RefCell<Vec<SharedString>>,
+        pending: RefCell<Vec<AlertCallback>>,
+    }
+
+    impl ChromeServices for Alerts {
+        fn set_menus(&self, _: &mut App, _: Vec<Menu>) {}
+        fn show_context_menu(&self, _: &mut App, _: WindowId, _: NodeId, _: f32, _: f32, _: ContextMenu) {}
+        fn alert(&self, _: &mut App, _: WindowId, alert: Alert, done: AlertCallback) {
+            self.shown.borrow_mut().push(alert.title);
+            self.pending.borrow_mut().push(done);
+        }
+        fn open_dialog(&self, cx: &mut App, _: WindowId, _: OpenDialog, done: OpenCallback) {
+            done(None, cx);
+        }
+        fn save_dialog(&self, cx: &mut App, _: WindowId, _: SaveDialog, done: SaveCallback) {
+            done(None, cx);
+        }
+    }
+
+    struct Picking {
+        h: Harness,
+        outcome: Rc<RefCell<Vec<Outcome>>>,
+        alerts: Rc<Alerts>,
+    }
+
+    fn folder(rel: &str) -> Option<Vec<u8>> {
+        let mut bytes = Harness::demo(rel).into_os_string().into_encoded_bytes();
+        bytes.push(0);
+        Some(bytes)
+    }
+
+    fn uri(rel: &str) -> String {
+        trove_fs::file_uri(&Harness::demo(rel))
+    }
+
+    fn filter(name: &str, patterns: &[(u32, &str)]) -> Filter {
+        Filter { name: name.into(), patterns: patterns.iter().map(|(k, p)| (*k, (*p).to_owned())).collect() }
+    }
+
+    impl Picking {
+        fn new(request: Request) -> Self {
+            let mut cx = TestApp::new();
+            let alerts = Rc::new(Alerts::default());
+            cx.set_global(Chrome(alerts.clone()));
+            let outcome = Rc::new(RefCell::new(Vec::new()));
+            let out = outcome.clone();
+            let window = cx.open_window(Size { width: 1000., height: 700. }, move |window, cx| {
+                trove::init(cx);
+                trove::demo_root();
+                let done = Box::new(move |o, _: &mut App| out.borrow_mut().push(o));
+                cx.new(|cx| Root::picking(request, done, window, cx))
+            });
+            let mut h = Harness { cx, window };
+            h.settle();
+            Self { h, outcome, alerts }
+        }
+
+        fn outcome(&self) -> Vec<Outcome> {
+            self.outcome.borrow().clone()
+        }
+
+        fn picked(&self) -> Vec<String> {
+            match self.outcome().as_slice() {
+                [Outcome::Picked { uris, .. }] => uris.clone(),
+                other => panic!("one pick, got {other:?}"),
+            }
+        }
+
+        fn name(&self) -> String {
+            let root = self.h.root();
+            let picker = root.read(&self.h.cx).picker().unwrap_or_else(|| panic!("a picker")).clone();
+            picker.read(&self.h.cx).name().to_owned()
+        }
+    }
+
+    #[test]
+    fn accept_returns_the_selected_files_as_uris() {
+        let request = Request { multiple: true, current_folder: folder("Documents"), ..Request::default() };
+        let mut p = Picking::new(request);
+        assert_eq!(p.h.location(), Location::Dir(Harness::demo("Documents")));
+        p.h.pick("files-table", &["chapter1.md", "Taxes 2025", "chapter2.md"], Some("chapter2.md"));
+        p.h.act(PickAccept);
+        assert_eq!(p.picked(), [uri("Documents/chapter1.md"), uri("Documents/chapter2.md")], "folders stay out");
+    }
+
+    #[test]
+    fn one_file_at_a_time_takes_the_cursor_and_a_folder_opens() {
+        let mut p = Picking::new(Request { current_folder: folder("Documents"), ..Request::default() });
+        p.h.pick("files-table", &["Taxes 2025"], Some("Taxes 2025"));
+        p.h.act(Open);
+        assert_eq!(p.h.location(), Location::Dir(Harness::demo("Documents/Taxes 2025")), "Enter goes into a folder");
+        assert!(p.outcome().is_empty());
+        p.h.pick("files-table", &["Return.pdf"], Some("Return.pdf"));
+        p.h.act(Open);
+        assert_eq!(p.picked(), [uri("Documents/Taxes 2025/Return.pdf")], "Enter on a file accepts it");
+        p.h.act(PickCancel);
+        assert_eq!(p.outcome().len(), 1, "a pick ends once");
+    }
+
+    #[test]
+    fn filters_hide_files_by_glob_and_mime_type_but_never_folders() {
+        let request = Request {
+            current_folder: folder("Documents"),
+            filters: vec![filter("Markdown", &[(0, "*.md")]), filter("Images", &[(1, "image/*")])],
+            ..Request::default()
+        };
+        let mut p = Picking::new(request);
+        assert_eq!(p.h.names(), ["Taxes 2025", "chapter1.md", "chapter2.md", "chapter10.md"]);
+        let picker = p.h.root().read(&p.h.cx).picker().expect("a picker").clone();
+        picker.update(&mut p.h.cx, |pk, cx| pk.set_filter(1, cx));
+        p.h.settle();
+        assert_eq!(p.h.names(), ["Taxes 2025"]);
+        p.h.go("Pictures");
+        assert_eq!(p.h.names(), ["Holiday", "Screenshots", "diagram.svg", "sunset.jpg"]);
+        p.h.pick("files-table", &["sunset.jpg"], Some("sunset.jpg"));
+        p.h.act(PickAccept);
+        let outcome = p.outcome();
+        let [Outcome::Picked { filter: Some(chosen), .. }] = outcome.as_slice() else { panic!("{outcome:?}") };
+        assert_eq!(chosen.name, "Images", "the filter in force goes back with the pick");
+    }
+
+    #[test]
+    fn folder_mode_lists_folders_and_returns_one() {
+        let request = Request { directory: true, current_folder: folder("Documents"), ..Request::default() };
+        let mut p = Picking::new(request);
+        assert_eq!(p.h.names(), ["Taxes 2025"], "files do not list");
+        p.h.act(PickAccept);
+        assert_eq!(p.picked(), [uri("Documents")], "nothing selected picks the folder shown");
+
+        let request = Request { directory: true, current_folder: folder("Documents"), ..Request::default() };
+        let mut p = Picking::new(request);
+        p.h.pick("files-table", &["Taxes 2025"], Some("Taxes 2025"));
+        p.h.act(PickAccept);
+        assert_eq!(p.picked(), [uri("Documents/Taxes 2025")]);
+    }
+
+    #[test]
+    fn save_returns_the_folder_and_name_and_asks_before_replacing() {
+        let request = Request {
+            mode: Mode::Save,
+            current_folder: folder("Documents"),
+            current_name: Some("draft.md".into()),
+            ..Request::default()
+        };
+        let mut p = Picking::new(request.clone());
+        assert_eq!(p.name(), "draft.md");
+        p.h.act(PickAccept);
+        assert_eq!(p.picked(), [uri("Documents/draft.md")]);
+
+        let mut p = Picking::new(request);
+        p.h.pick("files-table", &["chapter1.md"], Some("chapter1.md"));
+        assert_eq!(p.name(), "chapter1.md", "selecting a file takes its name");
+        p.h.act(PickAccept);
+        assert!(p.outcome().is_empty(), "nothing is returned before the answer");
+        assert_eq!(p.alerts.shown.borrow().as_slice(), ["\u{201c}chapter1.md\u{201d} already exists. Replace it?"]);
+        let keep = p.alerts.pending.borrow_mut().remove(0);
+        keep(AlertResponse(1), &mut p.h.cx);
+        p.h.settle();
+        assert!(p.outcome().is_empty(), "Cancel in the alert keeps the picker open");
+        p.h.act(PickAccept);
+        let replace = p.alerts.pending.borrow_mut().remove(0);
+        replace(AlertResponse(0), &mut p.h.cx);
+        p.h.settle();
+        assert_eq!(p.picked(), [uri("Documents/chapter1.md")]);
+    }
+
+    #[test]
+    fn save_files_into_the_folder_shown() {
+        let request = Request {
+            mode: Mode::SaveFiles,
+            current_folder: folder("Documents"),
+            files: vec![b"a.txt\0".to_vec(), b"b.txt\0".to_vec()],
+            ..Request::default()
+        };
+        let mut p = Picking::new(request);
+        p.h.act(PickAccept);
+        assert_eq!(p.picked(), [uri("Documents/a.txt"), uri("Documents/b.txt")]);
+    }
+
+    #[test]
+    fn escape_and_cancel_answer_cancelled() {
+        let mut p = Picking::new(Request { current_folder: folder("Documents"), ..Request::default() });
+        p.h.act(Deselect);
+        assert_eq!(p.outcome(), [Outcome::Cancelled]);
+
+        let mut p = Picking::new(Request::default());
+        p.h.act(PickCancel);
+        assert_eq!(p.outcome(), [Outcome::Cancelled]);
+    }
+}

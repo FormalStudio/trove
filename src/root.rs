@@ -2,7 +2,8 @@
 //! preview pane. It owns the tabs and routes every command to the active one; each piece that
 //! changes on its own (sidebar, path bar, tab content, status, preview) is its own view.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::rc::Rc;
 
 use nd::core::WindowId;
 use nd::prelude::*;
@@ -11,10 +12,11 @@ use crate::actions::*;
 use crate::icons;
 use crate::location::Location;
 use crate::pathbar::PathBar;
+use crate::picker::{Choice, Decision, Outcome, PickAccept, PickCancel, Picker};
 use crate::preview::Preview;
 use crate::sidebar::Sidebar;
 use crate::status::StatusBar;
-use crate::tab::{Tab, View};
+use crate::tab::{Load, Tab, View};
 
 /// The widest a tab gets, as in Explorer: a few tabs keep their titles instead of each taking
 /// a share of the window.
@@ -68,12 +70,37 @@ pub struct Root {
     chrome: Option<Chrome>,
     titles: Vec<String>,
     size: (f32, f32),
+    /// Set when the window picks files for another app.
+    picker: Option<Entity<Picker>>,
+    /// The filter the tabs list under, as last handed to them.
+    pick_filter: Option<usize>,
     _watch: Option<Subscription>,
     _volumes: Subscription,
+    _picker: Option<Subscription>,
 }
 
 impl Root {
     pub fn new(start: Start, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        Self::build(start, None, window, cx)
+    }
+
+    /// A window picking files for another app, opening where the request says or on the last
+    /// folder picked.
+    pub fn picking(
+        request: crate::picker::Request,
+        done: crate::picker::Done,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let last = crate::picker::last_folder(cx);
+        let start = crate::picker::start_folder(&request, last, &crate::env::get().home);
+        let picker = cx.new(|_| Picker::new(request, done));
+        let mut this = Self::build(Start::Path(start), Some(picker.clone()), window, cx);
+        this._picker = Some(cx.observe(&picker, |this: &mut Root, _, cx| this.sync_pick_filter(cx)));
+        this
+    }
+
+    fn build(start: Start, picker: Option<Entity<Picker>>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         crate::settings::init(cx);
         crate::ops::init(cx);
         let prefs = crate::settings::get(cx);
@@ -115,8 +142,11 @@ impl Root {
             chrome: None,
             titles: Vec::new(),
             size: (0., 0.),
+            pick_filter: picker.as_ref().map(|p| p.read(cx).filter_index()),
+            picker,
             _watch: None,
             _volumes: volumes,
+            _picker: None,
         };
         let view = match prefs.default_view {
             crate::settings::DefaultView::List => View::List,
@@ -211,6 +241,18 @@ impl Root {
         self.show_preview
     }
 
+    pub fn picker(&self) -> Option<&Entity<Picker>> {
+        self.picker.as_ref()
+    }
+
+    /// What takes the keys once the window shows: the name field when saving, else the files.
+    pub fn first_focus(&self, cx: &App) -> &'static str {
+        if self.picker.as_ref().is_some_and(|p| p.read(cx).request().mode == crate::picker::Mode::Save) {
+            return crate::picker::NAME_FIELD;
+        }
+        self.active_tab().read(cx).focus_target()
+    }
+
     /// Applies everything each tab's listing has sent, waiting up to `timeout` per tab: the
     /// host's pump, for tests and the appearance audit, which run none.
     pub fn drain(&mut self, timeout: std::time::Duration, cx: &mut Context<Self>) {
@@ -238,12 +280,16 @@ impl Root {
         let show_hidden = self.show_hidden;
         let folders_first = crate::settings::get(cx).folders_first;
         let window = self.window;
+        let shown = self.picker.as_ref().map(|p| Rc::new(p.read(cx).shown()));
         let tab = cx.new(|cx| {
             let mut t = Tab::new(location, show_hidden, view, cx);
             t.set_window(window);
             if !folders_first {
                 let sort = trove_fs::SortOrder { folders_first, ..t.sort() };
                 t.set_sort(sort, cx);
+            }
+            if let Some(shown) = shown {
+                t.set_pick(shown, cx);
             }
             t
         });
@@ -256,7 +302,10 @@ impl Root {
         let tab = self.active_tab().clone();
         self.status.update(cx, |s, cx| s.set_tab(&tab, cx));
         self.preview.update(cx, |p, cx| p.set_tab(&tab, cx));
-        self._watch = Some(cx.observe(&tab, |this: &mut Root, _, cx| this.sync_chrome(cx)));
+        self._watch = Some(cx.observe(&tab, |this: &mut Root, _, cx| {
+            this.sync_chrome(cx);
+            this.sync_pick_name(cx);
+        }));
         self.chrome = None;
         self.sync_chrome(cx);
         self.save_session(cx);
@@ -282,7 +331,11 @@ impl Root {
             return;
         }
         let location = chrome.location.clone();
-        cx.set_window_title(self.window, chrome.title.clone());
+        let title = match &self.picker {
+            Some(p) => p.read(cx).request().window_title(),
+            None => chrome.title.clone(),
+        };
+        cx.set_window_title(self.window, title);
         self.sidebar.update(cx, |s, cx| s.set_current(&location, cx));
         self.pathbar.update(cx, |p, cx| p.set_location(&location, cx));
         self.chrome = Some(chrome);
@@ -345,6 +398,13 @@ impl Root {
     }
 
     fn open(&mut self, _: &Open, window: &mut Window, cx: &mut Context<Self>) {
+        let picks_file = self.picker.is_some() && {
+            let t = self.active_tab().read(cx);
+            t.target().is_some_and(|id| !t.is_folder(&id))
+        };
+        if picks_file {
+            return self.pick_accept(window, cx);
+        }
         self.active_tab().clone().update(cx, |t, cx| {
             if let Some(id) = t.target() {
                 t.open(id, window, cx);
@@ -410,7 +470,7 @@ impl Root {
     /// The tabs as the next launch reopens them. Kept on every change; the store writes it a
     /// moment later off the main thread, and only when it moved.
     fn save_session(&mut self, cx: &mut Context<Self>) {
-        if crate::env::get().demo {
+        if crate::env::get().demo || self.picker.is_some() {
             return;
         }
         let tabs = self
@@ -626,9 +686,18 @@ impl Root {
                 cx.listener(|this, GoTo(path): &GoTo, window, cx| this.go(Location::Dir(path.clone()), window, cx)),
             )
             .on_action(cx.listener(|this, _: &Deselect, window, cx| {
+                if this.picker.is_some() {
+                    let cleared = this.active_tab().clone().update(cx, |t, cx| t.clear_search(window, cx));
+                    if !cleared {
+                        this.pick_end(Outcome::Cancelled, cx);
+                    }
+                    return;
+                }
                 this.with_tab(cx, |t, cx| t.deselect(window, cx));
                 this.focus_files(window, cx);
             }))
+            .on_action(cx.listener(|this, _: &PickAccept, window, cx| this.pick_accept(window, cx)))
+            .on_action(cx.listener(|this, _: &PickCancel, _, cx| this.pick_end(Outcome::Cancelled, cx)))
             .on_action(cx.listener(|this, _: &ListView, _, cx| this.with_tab(cx, |t, cx| t.set_view(View::List, cx))))
             .on_action(cx.listener(|this, _: &GridView, _, cx| this.with_tab(cx, |t, cx| t.set_view(View::Grid, cx))))
             .on_action(cx.listener(|this, _: &TogglePreview, _, cx| {
@@ -682,6 +751,89 @@ impl Root {
     }
 }
 
+// Picking files for another app.
+impl Root {
+    /// The picker's filter moved: every tab lists under the new one.
+    fn sync_pick_filter(&mut self, cx: &mut Context<Self>) {
+        let Some(picker) = self.picker.clone() else { return };
+        let at = picker.read(cx).filter_index();
+        if self.pick_filter == Some(at) {
+            return;
+        }
+        self.pick_filter = Some(at);
+        let shown = Rc::new(picker.read(cx).shown());
+        for (_, tab) in &self.tabs {
+            tab.update(cx, |t, cx| t.set_pick(shown.clone(), cx));
+        }
+    }
+
+    /// A save takes the name of the file selected.
+    fn sync_pick_name(&mut self, cx: &mut Context<Self>) {
+        let Some(picker) = self.picker.clone() else { return };
+        let file = {
+            let t = self.active_tab().read(cx);
+            t.target().filter(|id| !t.is_folder(id)).and_then(|id| t.path_of(&id))
+        };
+        picker.update(cx, |p, cx| p.selected_file(file, cx));
+    }
+
+    fn pick_accept(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(picker) = self.picker.clone() else { return };
+        let decision = {
+            let p = picker.read(cx);
+            let t = self.active_tab().read(cx);
+            let path_kind = |id: &trove_fs::EntryId| t.path_of(id).map(|p| (p, t.is_folder(id)));
+            let choice = Choice {
+                dir: t.location().dir().map(Path::to_path_buf),
+                selected: t.selected().iter().filter_map(path_kind).collect(),
+                target: t.target().as_ref().and_then(path_kind),
+                name: p.name().to_owned(),
+            };
+            // A save checks what exists against the listing, so it waits for every name.
+            let listed = matches!(t.load_state(), Load::Listed | Load::Complete);
+            if p.finished() || p.request().saving() && !listed {
+                Decision::Nothing
+            } else {
+                crate::picker::decide(p.request(), &choice, |path| t.listed(path))
+            }
+        };
+        match decision {
+            Decision::Enter(dir) => self.go(Location::Dir(dir), window, cx),
+            Decision::Accept(paths) => self.pick_finish(paths, cx),
+            Decision::Replace { paths, title } => {
+                let mut alert = Alert::confirm(title, "Replace");
+                alert.message = Some("Replacing overwrites what is there now.".into());
+                let me = self.me();
+                nd::chrome::alert(cx, self.window, alert, move |res, cx| {
+                    if res.0 == 0 {
+                        let _ = me.update(cx, |r, cx| r.pick_finish(paths, cx));
+                    }
+                });
+            }
+            Decision::Nothing => {}
+        }
+    }
+
+    fn pick_finish(&mut self, paths: Vec<PathBuf>, cx: &mut Context<Self>) {
+        let Some(picker) = self.picker.clone() else { return };
+        let here = self.active_tab().read(cx).location().dir().map(Path::to_path_buf);
+        let folder = here.or_else(|| paths.first().and_then(|p| p.parent()).map(Path::to_path_buf));
+        if let Some(folder) = folder {
+            crate::picker::remember(cx, &folder);
+        }
+        let outcome = picker.read(cx).picked(&paths);
+        self.pick_end(outcome, cx);
+    }
+
+    /// Hands `outcome` to the caller, once; a pick already ended ignores the rest.
+    fn pick_end(&mut self, outcome: Outcome, cx: &mut Context<Self>) {
+        let Some(picker) = self.picker.clone() else { return };
+        if let Some(done) = picker.update(cx, |p, _| p.take_done()) {
+            done(outcome, cx);
+        }
+    }
+}
+
 /// The mouse's back and forward buttons drive the active tab's history.
 pub fn history(e: &NavigateEvent, window: &mut Window, cx: &mut App) {
     let action: &dyn Action = match e.direction {
@@ -712,6 +864,7 @@ impl Render for Root {
             .children(tabs)
             .child(div().flex_1().min_h_0().child(self.active_tab().clone()))
             .child(self.status.clone())
+            .children(self.picker.clone())
             .child(self.quicklook.clone());
         let root = scaffold()
             .key_context(WINDOW)

@@ -143,6 +143,8 @@ pub struct Tab {
     names_traced: u64,
     /// The rows the view's list was last given.
     synced: (View, Vec<(EntryId, u64)>),
+    /// Picking for another app: which files list, and activating a file accepts the pick.
+    pick: Option<Rc<crate::picker::Shown>>,
     _clip: Subscription,
     pub(crate) extras: crate::extras::TabExtras,
 }
@@ -214,6 +216,7 @@ impl Tab {
             focus_shown: "",
             names_traced: 0,
             synced: (view, Vec::new()),
+            pick: None,
             _clip: watch_clip,
             extras: crate::extras::TabExtras::new(cx),
         };
@@ -629,10 +632,14 @@ impl Tab {
     fn refresh(&mut self, cx: &mut Context<Self>) {
         let filter = Filter::new(self.query.trim());
         let (show_hidden, in_trash) = (self.show_hidden, self.in_trash);
+        let pick = self.pick.clone();
         let mut folders = IdSet::default();
         self.visible.clear();
         for e in &self.entries {
-            if (show_hidden || !e.hidden) && filter.matches(&e.name) {
+            if (show_hidden || !e.hidden)
+                && filter.matches(&e.name)
+                && pick.as_ref().is_none_or(|p| p.shows(e, listed_folder(e)))
+            {
                 self.visible.push(e.id);
                 if !in_trash && listed_folder(e) {
                     folders.insert(e.id);
@@ -703,6 +710,16 @@ impl Tab {
             self.list_state_mut().jump_to(first, Align::Center, px(0.), cx);
         }
         cx.notify();
+    }
+
+    /// Lists for a pick: the files `shown` passes, one row selectable unless it allows many.
+    pub fn set_pick(&mut self, shown: Rc<crate::picker::Shown>, cx: &mut Context<Self>) {
+        self.pick = Some(shown);
+        self.refresh(cx);
+    }
+
+    pub fn picking(&self) -> bool {
+        self.pick.is_some()
     }
 
     pub fn set_show_hidden(&mut self, show: bool, cx: &mut Context<Self>) {
@@ -1360,8 +1377,9 @@ impl Tab {
     ) -> List<EntryId> {
         let me = cx.weak_entity();
         let (sel, act, drop) = (me.clone(), me.clone(), me);
+        let single = self.pick.as_ref().is_some_and(|p| !p.multiple);
         let list = list
-            .selection(Selection::multiple())
+            .selection(if single { Selection::single() } else { Selection::multiple() })
             .on_selection_change(move |e: &SelectionChanged<EntryId>, _, cx| {
                 let _ = sel.update(cx, |t, cx| t.on_selection_change(e, cx));
             })
@@ -1708,6 +1726,8 @@ impl Tab {
         let Some(path) = self.path_of(&id) else { return };
         if self.is_folder(&id) {
             self.navigate(Location::Dir(path), window, cx);
+        } else if self.pick.is_some() {
+            cx.dispatch_action(window.id(), &crate::picker::PickAccept);
         } else if let Err(e) = nd::system::open_path(&path) {
             let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
             let alert = Alert::new(format!("Could not open \u{201c}{name}\u{201d}")).message(e.to_string());
@@ -1765,6 +1785,12 @@ impl Tab {
         self.load(to, cx);
         self.reveal = select;
         self.apply_reveal(cx);
+    }
+
+    /// Whether `path` is in the listing, and if so whether it is a folder.
+    pub(crate) fn listed(&self, path: &Path) -> Option<bool> {
+        let id = self.id_of_path(path)?;
+        Some(self.listed_folder(&id))
     }
 
     pub(crate) fn id_of_path(&self, path: &Path) -> Option<EntryId> {

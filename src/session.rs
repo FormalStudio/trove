@@ -100,26 +100,26 @@ impl TabState {
 
 struct Saved(Store<Session>);
 
-/// Where the session lives: `$XDG_STATE_HOME/trove`, inside `ND_APP_DATA_DIR` when a test
-/// isolates the app, inside the fixture for the demo.
-fn path() -> PathBuf {
+/// Where the app keeps state file `name`: `$XDG_STATE_HOME/trove`, inside `ND_APP_DATA_DIR`
+/// when a test isolates the app, inside the fixture for the demo.
+pub(crate) fn state_file(name: &str) -> PathBuf {
     let env = crate::env::get();
     if env.demo {
-        return env.home.join(".local/state/trove/session.json");
+        return env.home.join(".local/state/trove").join(name);
     }
     if let Some(root) = std::env::var_os("ND_APP_DATA_DIR").filter(|d| !d.is_empty()) {
-        return PathBuf::from(root).join("state/session.json");
+        return PathBuf::from(root).join("state").join(name);
     }
     let state = std::env::var_os("XDG_STATE_HOME")
         .map(PathBuf::from)
         .filter(|p| p.is_absolute())
         .unwrap_or_else(|| std::env::home_dir().unwrap_or_default().join(".local/state"));
-    state.join("trove/session.json")
+    state.join("trove").join(name)
 }
 
 fn store(cx: &mut App) -> &Store<Session> {
     if !cx.has_global::<Saved>() {
-        let path = path();
+        let path = state_file("session.json");
         if let Some(dir) = path.parent() {
             let _ = std::fs::create_dir_all(dir);
         }

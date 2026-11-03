@@ -6,5 +6,6 @@ fn main() {
     nd::audit::Audit::new("trove", trove::app)
         .window("main", |cx| trove::open_demo(cx).id())
         .window("conflict", trove::open_conflict_demo)
+        .window("picker", trove::open_picker_demo)
         .run()
 }

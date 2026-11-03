@@ -200,6 +200,11 @@ fn remote_label(uri: &str) -> String {
     percent_decode_str(shown).decode_utf8_lossy().into_owned()
 }
 
+/// The path a `file://` URI names; `None` for any other scheme or a remote host.
+pub fn uri_path(uri: &str) -> Option<PathBuf> {
+    decode_path(uri.strip_prefix("file://")?)
+}
+
 /// The part of a `file://` URI after the scheme: an empty or `localhost` host, then the path.
 fn decode_path(after_scheme: &str) -> Option<PathBuf> {
     let path = if after_scheme.starts_with('/') {
@@ -211,7 +216,8 @@ fn decode_path(after_scheme: &str) -> Option<PathBuf> {
     Some(PathBuf::from(std::ffi::OsString::from_vec(bytes)))
 }
 
-fn file_uri(path: &Path) -> String {
+/// `path` as a `file://` URI, every byte outside the path set percent-encoded.
+pub fn file_uri(path: &Path) -> String {
     format!("file://{}", percent_encode(path.as_os_str().as_bytes(), URI_PATH))
 }
 

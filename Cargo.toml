@@ -44,6 +44,13 @@ trove-ops.workspace = true
 serde = { version = "1", features = ["derive"] }
 flume.workspace = true
 jiff = "0.2"
+serde_json = "1"
+glob = "0.3"
+mime_guess = "2.0.5"
+zbus = { version = "5.19", default-features = false, features = ["async-io"] }
+async-io = "2.6"
+async-process = "2.5"
+futures-lite = "2.6"
 nd = { git = "https://github.com/FormalStudio/NativeDesktop", branch = "main" }
 
 [dev-dependencies]
