@@ -32,8 +32,11 @@ fn side(path: &PathBuf) -> Option<Side> {
 
 /// Opens the sheet for `ask` over `parent`.
 pub fn open(cx: &mut App, parent: nd::core::WindowId, ask: Ask) -> WindowHandle<ConflictSheet> {
-    let options =
-        WindowOptions::main("main.conflict").kind(WindowKind::Sheet { parent }).size(size(px(520.), px(300.)));
+    let title = format!("\u{201c}{}\u{201d} already exists", ops::name_of(&ask.existing));
+    let options = WindowOptions::main("main.conflict")
+        .title(title)
+        .kind(WindowKind::Sheet { parent })
+        .size(size(px(520.), px(300.)));
     cx.open_window(options, move |_, cx| cx.new(|cx| ConflictSheet::new(ask, cx)))
 }
 
