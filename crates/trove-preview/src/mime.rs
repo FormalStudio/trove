@@ -44,6 +44,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         assert_eq!(mime_of(dir.path(), true), "inode/directory");
         assert_eq!(mime_of(Path::new("/nonexistent/a.png"), false), "image/png");
+        assert_eq!(mime_of(Path::new("/nonexistent/IMG_1.HEIC"), false), "image/heic");
+        assert_eq!(mime_of(Path::new("/nonexistent/a.heif"), false), "image/heif");
         assert_eq!(mime_of(Path::new("/nonexistent/a.ts"), false), "text/typescript");
         let png = dir.path().join("noext");
         std::fs::write(&png, [0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 0]).unwrap();

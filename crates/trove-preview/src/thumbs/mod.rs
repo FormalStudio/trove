@@ -46,6 +46,7 @@ pub fn cache_path(engine: &Engine, path: &Path, size: ThumbSize) -> PathBuf {
     engine.config.thumbnails_dir.join(size.dir()).join(format!("{}.png", uri::key_of(&uri::file_uri(path))))
 }
 
+/// A new decoder needs a version bump here, or files that failed before are never retried.
 fn fail_path(engine: &Engine, key: &str) -> PathBuf {
     engine
         .config

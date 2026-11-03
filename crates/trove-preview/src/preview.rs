@@ -64,7 +64,7 @@ pub fn preview_with(engine: Arc<Engine>, path: PathBuf, max_text: usize) -> flum
 }
 
 /// Formats the UI can draw as they are; every other image goes through a thumbnailer.
-const DRAWABLE: &[&str] = &["png", "jpg", "jpeg", "gif", "webp", "bmp", "tif", "tiff", "ico", "svg"];
+const DRAWABLE: &[&str] = &["png", "jpg", "jpeg", "gif", "webp", "bmp", "tif", "tiff", "ico", "svg", "heic", "heif"];
 
 impl Engine {
     /// Blocking form of [`preview`].
@@ -143,6 +143,12 @@ pub(crate) fn image_size(path: &Path) -> Option<(u32, u32)> {
     if is_svg {
         return Some(svg_size(path).unwrap_or((0, 0)));
     }
+    let is_heif = path.extension().is_some_and(|e| e.eq_ignore_ascii_case("heic") || e.eq_ignore_ascii_case("heif"));
+    if is_heif {
+        // imagesize reads the stored size, which irot has not been applied to.
+        let info = heic_rs::probe(&fs::read(path).ok()?).ok()?;
+        return Some((info.width, info.height));
+    }
     let s = imagesize::size(path).ok()?;
     Some((u32::try_from(s.width).ok()?, u32::try_from(s.height).ok()?))
 }
@@ -210,6 +216,15 @@ mod tests {
         let p = write(dir.path(), "a.png", &png_bytes(30, 20));
         let e = engine(dir.path());
         assert_eq!(e.preview(&p, 100), Preview::Image { path: p, width: 30, height: 20 });
+    }
+
+    #[test]
+    fn heic_previews_as_an_image_with_the_probed_size() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = write(dir.path(), "IMG_0001.HEIC", include_bytes!("../tests/fixtures/tiny.heic"));
+        let e = engine(dir.path());
+        assert_eq!(e.preview(&p, 100), Preview::Image { path: p.clone(), width: 64, height: 48 });
+        assert_eq!(image_size(&p), Some((64, 48)));
     }
 
     #[test]

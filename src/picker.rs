@@ -660,6 +660,15 @@ mod tests {
     }
 
     #[test]
+    fn heic_names_pass_image_filters() {
+        let images = Matcher::new(&filter(&[(1, "image/*")]));
+        let heic = Matcher::new(&filter(&[(1, "image/heic")]));
+        let heif = Matcher::new(&filter(&[(1, "image/heif")]));
+        assert!(images.matches("IMG_1712.HEIC") && images.matches("a.heif"));
+        assert!(heic.matches("IMG_1712.HEIC") && heif.matches("a.heif"));
+    }
+
+    #[test]
     fn globs_and_mime_types_match_names() {
         let images = Matcher::new(&filter(&[(1, "image/*")]));
         assert!(images.matches("sunset.jpg") && images.matches("diagram.svg"));

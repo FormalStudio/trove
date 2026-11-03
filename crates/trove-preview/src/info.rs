@@ -219,6 +219,15 @@ mod tests {
     }
 
     #[test]
+    fn heic_info_carries_dimensions() {
+        let dir = tempfile::tempdir().unwrap();
+        let heic = dir.path().join("IMG_0001.HEIC");
+        fs::write(&heic, include_bytes!("../tests/fixtures/tiny.heic")).unwrap();
+        let i = info_blocking(&heic).unwrap();
+        assert_eq!((i.mime.as_str(), i.dimensions), ("image/heic", Some((64, 48))));
+    }
+
+    #[test]
     fn channel_form_delivers() {
         let dir = tempfile::tempdir().unwrap();
         let f = dir.path().join("t.txt");

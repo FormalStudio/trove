@@ -78,6 +78,21 @@ fn small_images_are_not_upscaled() {
 }
 
 #[test]
+fn heic_gets_a_thumbnail_at_the_fit_size() {
+    let r = rig();
+    let src = r.dir.join("IMG_0001.HEIC");
+    fs::write(&src, include_bytes!("../../tests/fixtures/tiny.heic")).unwrap();
+    let t = r.engine.thumbnail(&src, mtime_of(&src), ThumbSize::Large).unwrap();
+    assert_eq!(decode_dims(&t), (64, 48), "small images are not upscaled");
+    let img = image::open(&t).unwrap().into_rgba8();
+    let (left, right) = (img.get_pixel(8, 24), img.get_pixel(56, 24));
+    assert!(left[0] > 150 && left[2] < 100, "left is red: {left:?}");
+    assert!(right[2] > 150 && right[0] < 100, "right is blue: {right:?}");
+    let n = r.engine.thumbnail(&src, mtime_of(&src), ThumbSize::Normal).unwrap();
+    assert_eq!(decode_dims(&n), (64, 48));
+}
+
+#[test]
 fn jpeg_is_decoded_scaled() {
     let r = rig();
     let src = r.dir.join("photo.JPG");

@@ -4,9 +4,9 @@ use std::path::Path;
 
 use image::{DynamicImage, ImageDecoder, ImageReader, RgbaImage};
 
-/// Extensions the `image` crate is built with here.
+/// Extensions the `image` crate is built with here, plus HEIC through heic-rs.
 pub(crate) fn decodable(ext: &str) -> bool {
-    matches!(ext, "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" | "tif" | "tiff")
+    matches!(ext, "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" | "tif" | "tiff" | "heic" | "heif")
 }
 
 pub(crate) struct Rendered {
@@ -27,6 +27,13 @@ fn fit(w: u32, h: u32, edge: u32) -> (u32, u32) {
 /// Decode `path` to at most `edge` pixels on the long side. JPEGs are decoded at 1/2, 1/4 or 1/8
 /// size straight from the DCT, which is most of the cost of a 12 MP photo.
 pub(crate) fn render(path: &Path, edge: u32) -> Option<Rendered> {
+    let is_heif = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| e.eq_ignore_ascii_case("heic") || e.eq_ignore_ascii_case("heif"));
+    if is_heif {
+        return render_heif(path, edge);
+    }
     let is_jpeg = path
         .extension()
         .and_then(|e| e.to_str())
@@ -42,6 +49,15 @@ pub(crate) fn render_generic(path: &Path, edge: u32) -> Option<Rendered> {
     let orientation = decoder.orientation().ok();
     let img = DynamicImage::from_decoder(decoder).ok()?;
     finish(img, edge, orientation)
+}
+
+/// heic-rs applies clap/irot/imir itself, so no orientation is passed on.
+fn render_heif(path: &Path, edge: u32) -> Option<Rendered> {
+    let bytes = std::fs::read(path).ok()?;
+    let options = heic_rs::DecodeOptions { layout: heic_rs::PixelLayout::Rgba8, ..heic_rs::DecodeOptions::default() };
+    let decoded = heic_rs::decode(&bytes, &options).ok()?;
+    let img = DynamicImage::ImageRgba8(RgbaImage::from_raw(decoded.width, decoded.height, decoded.data)?);
+    finish(img, edge, None)
 }
 
 fn render_jpeg_scaled(path: &Path, edge: u32) -> Option<Rendered> {
