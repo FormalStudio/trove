@@ -73,6 +73,8 @@ pub(crate) struct Ctx {
     pub trashed: Vec<(PathBuf, PathBuf)>,
     /// Items taken out of the trash, as (trashed, restored).
     pub restored: Vec<(PathBuf, PathBuf)>,
+    /// Permission bits changed, as (path, the bits before).
+    pub modes: Vec<(PathBuf, u32)>,
     /// Something existing was overwritten or merged into: no inverse can bring it back.
     pub tainted: bool,
     /// Fifos, sockets and device nodes a copy passed over.
@@ -110,6 +112,7 @@ impl Ctx {
             pairs: Vec::new(),
             trashed: Vec::new(),
             restored: Vec::new(),
+            modes: Vec::new(),
             tainted: false,
             skipped: 0,
             reflink: true,

@@ -2,12 +2,13 @@
 //! Every item is an action, so a menu item, its key and its toolbar button never disagree; the
 //! items act on the selection, which a right click on an unselected row moves to that row first.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use nd::prelude::*;
 use trove_fs::SortKey;
 
 use crate::actions::*;
+use crate::keys::ColumnsView;
 use crate::location::Location;
 use crate::tab::View;
 
@@ -31,6 +32,9 @@ pub fn files(menu: ContextMenu, t: &Target, cx: &mut App) -> ContextMenu {
     let mut menu = menu.item("Open", Open);
     if one_folder {
         menu = menu.item("Open in new tab", OpenInNewTab);
+        if !t.in_trash {
+            menu = menu.item("Open in terminal", OpenTerminal);
+        }
     }
     if files_only && !t.in_trash {
         menu = menu.submenu(open_with(t, cx));
@@ -50,6 +54,8 @@ pub fn files(menu: ContextMenu, t: &Target, cx: &mut App) -> ContextMenu {
     menu = menu.item("Duplicate", Duplicate);
     if t.paths.len() == 1 {
         menu = menu.item("Rename\u{2026}", Rename);
+    } else if t.paths.len() > 1 {
+        menu = menu.item(format!("Rename {} items\u{2026}", t.paths.len()), BatchRename);
     }
     menu = menu.separator().item("Compress", Compress);
     if t.archive {
@@ -59,7 +65,7 @@ pub fn files(menu: ContextMenu, t: &Target, cx: &mut App) -> ContextMenu {
     if one_folder {
         menu = menu.item("Add to bookmarks", AddBookmark);
     }
-    menu.separator().item_destructive("Move to Trash", Trash)
+    menu.separator().item_destructive("Move to Trash", Trash).separator().item("Properties\u{2026}", Properties)
 }
 
 /// "Open with": the apps for the first file's type, the default first, then a submenu that
@@ -103,7 +109,13 @@ pub fn folder(menu: ContextMenu, h: &Here) -> ContextMenu {
     if h.in_trash {
         menu = menu.item_destructive("Empty Trash", EmptyTrash).separator();
     } else if !h.recent {
-        menu = menu.item("New folder", NewFolder).item("New file", NewFile).item("Paste", Paste).separator();
+        menu = menu
+            .item("New folder", NewFolder)
+            .item("New file", NewFile)
+            .item("Paste", Paste)
+            .separator()
+            .item("Open in terminal", OpenTerminal)
+            .separator();
     }
     let key = |label: &'static str, k: SortKey| MenuItem::action(label, SortBy(k)).checked(h.sort.key == k);
     let sort = Menu::new("Sort by").items([
@@ -111,14 +123,48 @@ pub fn folder(menu: ContextMenu, h: &Here) -> ContextMenu {
         key("Size", SortKey::Size),
         key("Kind", SortKey::Kind),
         key("Modified", SortKey::Modified),
+        key("Created", SortKey::Created),
+        MenuItem::separator(),
+        MenuItem::action("Ascending", SortAscending).checked(h.sort.ascending),
+        MenuItem::action("Descending", SortDescending).checked(!h.sort.ascending),
         MenuItem::separator(),
         MenuItem::action("Folders first", ToggleFoldersFirst).checked(h.sort.folders_first),
     ]);
     let view = Menu::new("View").items([
         MenuItem::action("List", ListView).checked(h.view == View::List),
         MenuItem::action("Grid", GridView).checked(h.view == View::Grid),
+        MenuItem::action("Columns", ColumnsView).checked(h.view == View::Columns),
     ]);
-    menu.entry(MenuItem::action("Show hidden files", ToggleHidden).checked(h.show_hidden)).submenu(sort).submenu(view)
+    let menu = menu
+        .entry(MenuItem::action("Show hidden files", ToggleHidden).checked(h.show_hidden))
+        .submenu(sort)
+        .submenu(view);
+    if h.recent { menu } else { menu.separator().item("Properties\u{2026}", Properties) }
+}
+
+/// The menu on a path bar segment: the folder it names, then the folders beside it to jump to.
+/// `siblings` is `None` while they are still being read.
+pub fn crumb(menu: ContextMenu, path: &Path, siblings: Option<&[String]>) -> ContextMenu {
+    let dir = path.to_path_buf();
+    let menu = menu
+        .item("Open in new tab", OpenPlaceInNewTab(Location::Dir(dir.clone())))
+        .item("Open in terminal", OpenTerminalAt(dir.clone()))
+        .item("Copy path", CopyPathOf(dir));
+    let Some(parent) = path.parent() else { return menu };
+    let own = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let mut beside = Menu::new("Folders beside it");
+    match siblings {
+        None => beside = beside.item(MenuItem::action("Looking\u{2026}", GoTo(parent.to_path_buf())).enabled(false)),
+        Some([]) => {
+            beside = beside.item(MenuItem::action("No other folders", GoTo(parent.to_path_buf())).enabled(false))
+        }
+        Some(names) => {
+            for name in names {
+                beside = beside.item(MenuItem::action(name.clone(), GoTo(parent.join(name))).checked(*name == own));
+            }
+        }
+    }
+    menu.separator().submenu(beside)
 }
 
 /// What a sidebar row's menu acts on.

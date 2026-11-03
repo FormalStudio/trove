@@ -51,6 +51,11 @@ actions!(
         Restore,
         EmptyTrash,
         ToggleFoldersFirst,
+        SortAscending,
+        SortDescending,
+        OpenTerminal,
+        Properties,
+        BatchRename,
     ]
 );
 
@@ -125,6 +130,16 @@ pub struct TypeSelect(pub char);
 #[action(namespace = trove, no_json)]
 pub struct GoTo(pub PathBuf);
 
+/// A terminal in this folder: the path bar's menu on one of its segments.
+#[derive(Clone, PartialEq, Debug, Action)]
+#[action(namespace = trove, no_json)]
+pub struct OpenTerminalAt(pub PathBuf);
+
+/// Puts this path on the clipboard as text: the path bar's menu.
+#[derive(Clone, PartialEq, Debug, Action)]
+#[action(namespace = trove, no_json)]
+pub struct CopyPathOf(pub PathBuf);
+
 /// The whole window: everything inside the root view.
 pub const WINDOW: &str = "Trove";
 /// The listing's box: its keys match while the list inside it has focus.
@@ -140,8 +155,9 @@ pub const RENAMING: &str = "Renaming";
 /// What a dragged row or tile carries.
 pub const DRAG_FILES: &str = "trove/files";
 
-/// What type-select answers to: letters, digits and the punctuation names start with.
-const TYPED: &str = "abcdefghijklmnopqrstuvwxyz0123456789.";
+/// What type-select answers to: letters of either case, digits and the punctuation names start
+/// with. A capital binds as Shift and its letter, and "_" matches the character Shift+"-" types.
+const TYPED: &str = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.-_";
 
 pub fn bind(cx: &mut App) {
     let w = Some(WINDOW);

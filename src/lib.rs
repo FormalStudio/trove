@@ -2,6 +2,7 @@
 //! `tab::Tab` holding its own listing.
 
 pub mod actions;
+pub mod batch_rename;
 mod columns;
 mod conflict;
 mod demo;
@@ -12,12 +13,13 @@ mod format;
 mod icons;
 pub mod keys;
 mod location;
-mod menus;
+pub mod menus;
 pub mod ops;
 mod pathbar;
 pub mod picker;
 pub mod portal;
 mod preview;
+pub mod properties;
 mod pump;
 mod quicklook;
 mod results;

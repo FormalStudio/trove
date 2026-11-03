@@ -682,3 +682,49 @@ fn delete_removes_trees() {
     assert!(!r.p("tree").exists());
     r.run(Op::Delete { paths: vec![r.p("nope")] }).error();
 }
+
+#[test]
+fn rename_many_undoes_as_one_job() {
+    let r = rig();
+    let a = r.write("a.txt", "a");
+    let b = r.write("b.txt", "b");
+    let renames = vec![(a.clone(), "one.txt".into()), (b.clone(), "two.txt".into())];
+    let created = r.run(Op::RenameMany { renames }).created();
+    assert_eq!(created, [r.p("one.txt"), r.p("two.txt")]);
+    assert_eq!(names(r.work.path()), ["one.txt", "two.txt"]);
+    r.undo().created();
+    assert_eq!(names(r.work.path()), ["a.txt", "b.txt"], "one undo brings every name back");
+    assert_eq!(read(&a), "a");
+    r.redo().created();
+    assert_eq!(names(r.work.path()), ["one.txt", "two.txt"]);
+}
+
+#[test]
+fn rename_many_stops_at_a_taken_name_and_undoes_what_it_did() {
+    let r = rig();
+    let a = r.write("a.txt", "a");
+    let b = r.write("b.txt", "b");
+    r.write("taken.txt", "t");
+    let renames = vec![(a.clone(), "one.txt".into()), (b.clone(), "taken.txt".into())];
+    assert!(r.run(Op::RenameMany { renames }).error().contains("already exists"));
+    assert_eq!(read(&r.p("taken.txt")), "t", "nothing is overwritten");
+    r.undo().created();
+    assert_eq!(names(r.work.path()), ["a.txt", "b.txt", "taken.txt"]);
+}
+
+#[test]
+fn set_permissions_and_undo() {
+    use std::os::unix::fs::PermissionsExt;
+    let r = rig();
+    let a = r.write("a.sh", "#!/bin/sh");
+    let b = r.write("b.sh", "#!/bin/sh");
+    fs::set_permissions(&a, fs::Permissions::from_mode(0o644)).unwrap();
+    fs::set_permissions(&b, fs::Permissions::from_mode(0o600)).unwrap();
+    let mode = |p: &Path| fs::metadata(p).unwrap().mode() & 0o7777;
+    r.run(Op::SetPermissions { modes: vec![(a.clone(), 0o755), (b.clone(), 0o700)] }).created();
+    assert_eq!((mode(&a), mode(&b)), (0o755, 0o700));
+    r.undo().created();
+    assert_eq!((mode(&a), mode(&b)), (0o644, 0o600));
+    r.redo().created();
+    assert_eq!((mode(&a), mode(&b)), (0o755, 0o700));
+}

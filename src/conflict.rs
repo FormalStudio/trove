@@ -68,7 +68,7 @@ impl ConflictSheet {
 }
 
 /// `~/Documents/Notes.md` for a path under Home, else the path as it is.
-fn home_relative(path: &Path) -> String {
+pub(crate) fn home_relative(path: &Path) -> String {
     match path.strip_prefix(&crate::env::get().home) {
         Ok(rest) if rest.as_os_str().is_empty() => "~".to_owned(),
         Ok(rest) => format!("~/{}", rest.display()),

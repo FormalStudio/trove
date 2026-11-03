@@ -97,7 +97,35 @@ pub fn register(root: Scaffold, cx: &mut Context<Root>) -> Scaffold {
                 t.set_sort(sort, cx);
             });
         }))
+        .on_action(cx.listener(|r, _: &SortAscending, _, cx| set_ascending(r, true, cx)))
+        .on_action(cx.listener(|r, _: &SortDescending, _, cx| set_ascending(r, false, cx)))
         .on_action(cx.listener(|r, e: &DropOnto, _, cx| drop_onto(r, e, cx)))
+        .on_action(cx.listener(|r, _: &OpenTerminal, _, cx| {
+            let dir = r.active_tab().read(cx).selected_folder().or_else(|| here(r, cx));
+            if let Some(dir) = dir {
+                open_terminal(r, dir, cx);
+            }
+        }))
+        .on_action(cx.listener(|r, OpenTerminalAt(dir): &OpenTerminalAt, _, cx| open_terminal(r, dir.clone(), cx)))
+        .on_action(cx.listener(|_, CopyPathOf(path): &CopyPathOf, _, cx| {
+            nd::clipboard::write_text(cx, path.display().to_string());
+        }))
+        .on_action(cx.listener(|r, _: &Properties, _, cx| {
+            let mut paths = selection(r, cx);
+            if paths.is_empty() {
+                paths.extend(r.active_tab().read(cx).location().dir().map(Path::to_path_buf));
+            }
+            if !paths.is_empty() {
+                crate::properties::open(cx, r.window_id(), paths);
+            }
+        }))
+        .on_action(cx.listener(|r, _: &BatchRename, _, cx| {
+            let paths = selection(r, cx);
+            if !paths.is_empty() && !in_trash(r, cx) {
+                let o = origin(r, cx);
+                crate::batch_rename::open(cx, o, paths);
+            }
+        }))
 }
 
 fn origin(r: &Root, _cx: &App) -> Origin {
@@ -265,6 +293,28 @@ fn sort_by(r: &mut Root, key: SortKey, cx: &mut Context<Root>) {
         }
         t.set_sort(sort, cx);
     });
+}
+
+fn set_ascending(r: &mut Root, ascending: bool, cx: &mut Context<Root>) {
+    r.active_tab().clone().update(cx, |t, cx| {
+        let mut sort = t.sort();
+        sort.ascending = ascending;
+        t.set_sort(sort, cx);
+    });
+}
+
+/// The user's terminal in `dir`, saying so when none starts.
+fn open_terminal(r: &mut Root, dir: PathBuf, cx: &mut Context<Root>) {
+    let window = r.window_id();
+    ops::background(
+        cx.weak_entity(),
+        move || trove_ops::open_terminal(&dir).err(),
+        move |_: &mut Root, failed, cx| {
+            if let Some(why) = failed {
+                nd::chrome::alert(cx, window, Alert::new("Could not open a terminal").message(why), |_, _| {});
+            }
+        },
+    );
 }
 
 /// How a drop moves its files: by the file system rule, or as the held key asks.

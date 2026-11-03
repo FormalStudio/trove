@@ -179,3 +179,78 @@ fn real_docs_images() {
     std::thread::sleep(Duration::from_millis(1000));
     grab("search");
 }
+
+/// The Properties and batch rename sheets over the demo fixture, dark, at 1600x1000, opened from
+/// the files menu as a user would. They land in `artifacts/shots/sheets/` for review; nothing
+/// copies them into `docs/`.
+#[test]
+fn real_sheet_shots() {
+    if !real_allowed() {
+        println!("skipped: opens a real window; run with ND_REAL=1");
+        return;
+    }
+    // No size rule: it would match the sheets too, which share the app's class.
+    let compositor = Hyprland::start(Options { width: 1400, height: 900, ..Default::default() }).unwrap();
+    let env = compositor.client_env();
+    let shots = Path::new(env!("CARGO_MANIFEST_DIR")).join("artifacts").join("shots");
+    let sheets = shots.join("sheets");
+    std::fs::create_dir_all(&sheets).unwrap();
+    let toml = shots.join("theme-dark.toml");
+    std::fs::write(&toml, "appearance = \"dark\"\n").unwrap();
+    let grab = |name: &str| {
+        let out = sheets.join(format!("{name}.png"));
+        let status = compositor.command("grim").arg("-l").arg("9").arg(&out).status().unwrap();
+        assert!(status.success(), "grim failed");
+        println!("screenshot {}", out.display());
+    };
+
+    let mut options = LaunchOptions::new(bin()).env("TROVE_DEMO", "1").env("ND_THEME_TOML", toml.display().to_string());
+    for (key, value) in &env {
+        options = options.env(*key, value.clone());
+    }
+    let app = launch_app(options).unwrap();
+    let keys = |k: &str, settle: u64| {
+        app.keyboard().press(k).unwrap();
+        std::thread::sleep(Duration::from_millis(settle));
+    };
+    // The drawn menu is not in the semantic tree, so an item is reached on the keyboard: Up from
+    // no row lands on the last one.
+    let menu_up = |steps: usize| {
+        std::thread::sleep(Duration::from_millis(400));
+        keys(&vec!["up"; steps].join(" "), 200);
+        keys("enter", 900);
+    };
+    expect(&app.get_by_test_id("files-table")).to_be_visible().unwrap();
+    std::thread::sleep(Duration::from_millis(600));
+
+    keys("d o c enter", 800);
+    app.get_by_text("Quarterly report.docx").right_click().unwrap();
+    menu_up(1);
+    grab("properties");
+    keys("escape", 600);
+
+    // A row is no control, so the pointer goes to its middle.
+    let click_at = |locator: nd_test::Locator, fx: f32| {
+        let b = locator.bounding_box().unwrap().unwrap();
+        app.mouse().click(b.x + b.width * fx, b.y + b.height / 2.).unwrap();
+    };
+    click_at(app.get_by_test_id("cell-0").filter_has_text("chapter1.md").first(), 0.5);
+    keys("shift-down shift-down", 400);
+    app.get_by_text("chapter2.md").right_click().unwrap();
+    // Properties, Move to Trash, Copy path, Compress, then "Rename 3 items…".
+    menu_up(5);
+    app.get_by_test_id("rename-find").type_text("chapter").unwrap();
+    app.get_by_test_id("rename-with").type_text("Part ").unwrap();
+    std::thread::sleep(Duration::from_millis(600));
+    grab("batch-rename");
+
+    app.get_by_test_id("rename-regex").click().unwrap();
+    app.get_by_test_id("rename-find").fill(r"chapter\d+").unwrap();
+    app.get_by_test_id("rename-with").fill("Roadmap").unwrap();
+    std::thread::sleep(Duration::from_millis(600));
+    grab("batch-rename-conflict");
+
+    app.get_by_test_id("rename-mode").fill("Number").unwrap();
+    std::thread::sleep(Duration::from_millis(400));
+    grab("batch-rename-number");
+}

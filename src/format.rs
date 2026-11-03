@@ -21,6 +21,11 @@ pub fn size(bytes: u64) -> String {
     if value < 9.95 { format!("{value:.1} {}", UNITS[unit]) } else { format!("{value:.0} {}", UNITS[unit]) }
 }
 
+/// "4.1 MB (4 100 000 bytes)", the exact count beside the rounded one past a kilobyte.
+pub fn size_long(bytes: u64) -> String {
+    if bytes < 1000 { size(bytes) } else { format!("{} ({} bytes)", size(bytes), group(bytes as usize)) }
+}
+
 pub fn items(n: usize) -> String {
     if n == 1 { "1 item".to_owned() } else { format!("{} items", group(n)) }
 }

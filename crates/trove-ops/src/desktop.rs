@@ -418,6 +418,7 @@ fn file_uri(p: &Path) -> String {
 pub(crate) struct Launch {
     pub argv: Vec<String>,
     pub env: Vec<(String, String)>,
+    pub cwd: Option<PathBuf>,
 }
 
 const SHELLS: [&str; 8] = ["sh", "bash", "dash", "zsh", "ksh", "mksh", "ash", "fish"];
@@ -631,26 +632,33 @@ pub(crate) fn expand_exec(app: &AppInfo, files: &[PathBuf]) -> Result<Vec<Launch
     })
 }
 
-const TERMINALS: [&str; 7] = ["foot", "kitty", "alacritty", "wezterm", "gnome-terminal", "konsole", "xterm"];
+const TERMINALS: [&str; 8] = ["foot", "ghostty", "kitty", "alacritty", "wezterm", "gnome-terminal", "konsole", "xterm"];
+
+/// The user's terminal: `$TERMINAL` (with any arguments it carries), else `xdg-terminal-exec`,
+/// the default-terminal launcher where the session has one, else the first one installed.
+fn terminal(env: &Env) -> Result<(String, Vec<String>), String> {
+    if let Some(t) = env.terminal.as_deref().map(str::trim).filter(|t| !t.is_empty()) {
+        let mut parts = t.split_whitespace().map(str::to_owned);
+        let program = parts.next().unwrap_or_default();
+        return Ok((program, parts.collect()));
+    }
+    std::iter::once(&"xdg-terminal-exec")
+        .chain(TERMINALS.iter())
+        .find(|t| env.has_tool(t))
+        .map(|t| ((*t).to_owned(), Vec::new()))
+        .ok_or_else(|| "No terminal emulator found".to_owned())
+}
+
+fn base_name(program: &str) -> String {
+    Path::new(program).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()
+}
 
 /// Wraps `argv` so it runs inside a terminal emulator.
 pub(crate) fn in_terminal(env: &Env, argv: Vec<String>) -> Result<Vec<String>, String> {
-    let (term, mut lead): (String, Vec<String>) = match env.terminal.as_deref().map(str::trim).filter(|t| !t.is_empty())
-    {
-        Some(t) => {
-            let mut parts = t.split_whitespace().map(str::to_owned);
-            let program = parts.next().unwrap_or_default();
-            (program, parts.collect())
-        }
-        None => match TERMINALS.iter().find(|t| env.has_tool(t)) {
-            Some(t) => ((*t).to_owned(), Vec::new()),
-            None => return Err("No terminal emulator found to run this app in".into()),
-        },
-    };
+    let (term, mut lead) = terminal(env).map_err(|_| "No terminal emulator found to run this app in".to_owned())?;
     if lead.is_empty() {
-        let base = Path::new(&term).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-        lead = match base.as_str() {
-            "foot" | "kitty" => vec![],
+        lead = match base_name(&term).as_str() {
+            "foot" | "kitty" | "xdg-terminal-exec" => vec![],
             "wezterm" => vec!["start".into(), "--".into()],
             "gnome-terminal" => vec!["--".into()],
             _ => vec!["-e".into()],
@@ -660,6 +668,25 @@ pub(crate) fn in_terminal(env: &Env, argv: Vec<String>) -> Result<Vec<String>, S
     out.extend(lead);
     out.extend(argv);
     Ok(out)
+}
+
+/// A terminal opening on `dir`. The launch also starts in `dir`; the flag is for terminals that
+/// go to the home folder when started from a desktop app rather than a shell.
+pub(crate) fn terminal_in(env: &Env, dir: &Path) -> Result<Launch, String> {
+    let (term, lead) = terminal(env)?;
+    let d = dir.to_string_lossy().into_owned();
+    let flag: Vec<String> = match base_name(&term).as_str() {
+        "foot" | "ghostty" | "gnome-terminal" => vec![format!("--working-directory={d}")],
+        "alacritty" => vec!["--working-directory".into(), d],
+        "kitty" => vec!["--directory".into(), d],
+        "wezterm" => vec!["start".into(), "--cwd".into(), d],
+        "konsole" => vec!["--workdir".into(), d],
+        _ => Vec::new(),
+    };
+    let mut argv = vec![term];
+    argv.extend(lead);
+    argv.extend(flag);
+    Ok(Launch { argv, cwd: Some(dir.to_path_buf()), ..Launch::default() })
 }
 
 /// `[Default Applications]` with `mime=id;`, everything else in the file left as it was.

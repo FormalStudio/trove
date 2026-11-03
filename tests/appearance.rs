@@ -7,5 +7,7 @@ fn main() {
         .window("main", |cx| trove::open_demo(cx).id())
         .window("conflict", trove::open_conflict_demo)
         .window("picker", trove::open_picker_demo)
+        .window("properties", trove::properties::open_demo)
+        .window("batch-rename", trove::batch_rename::open_demo)
         .run()
 }

@@ -230,6 +230,14 @@ fn title_of(job: &Job, origin: Origin) -> String {
             Op::Duplicate { paths } => format!("Duplicating {}", count_label(paths.len(), &first_name(paths))),
             Op::Compress { paths, .. } => format!("Compressing {}", count_label(paths.len(), &first_name(paths))),
             Op::Extract { archive, .. } => format!("Extracting \"{}\"", name_of(archive)),
+            Op::SetPermissions { modes } => {
+                let paths: Vec<PathBuf> = modes.iter().map(|(p, _)| p.clone()).collect();
+                format!("Changing permissions of {}", count_label(paths.len(), &first_name(&paths)))
+            }
+            Op::RenameMany { renames } => {
+                let paths: Vec<PathBuf> = renames.iter().map(|(p, _)| p.clone()).collect();
+                format!("Renaming {}", count_label(paths.len(), &first_name(&paths)))
+            }
         },
     };
     format!("{prefix}{body}")
@@ -260,6 +268,8 @@ fn execute(ctx: &mut Ctx, job: &Job) -> R<()> {
             Op::EmptyTrash => trash::empty_trash(ctx),
             Op::Compress { paths, dest } => archive::compress(ctx, paths, dest),
             Op::Extract { archive, dest_dir } => archive::extract(ctx, archive, dest_dir),
+            Op::SetPermissions { modes } => fsops::set_modes(ctx, modes),
+            Op::RenameMany { renames } => fsops::rename_many(ctx, renames),
         },
     }
 }
@@ -277,7 +287,9 @@ fn inverse_of(job: &Job, ctx: &Ctx) -> Option<Job> {
     match job {
         Job::Pairs(_) => reverse(&ctx.pairs),
         Job::Op(op) => match op {
-            Op::Move { .. } | Op::Rename { .. } => reverse(&ctx.pairs),
+            Op::Move { .. } | Op::Rename { .. } | Op::RenameMany { .. } => reverse(&ctx.pairs),
+            Op::SetPermissions { .. } => (!ctx.modes.is_empty())
+                .then(|| Job::Op(Op::SetPermissions { modes: ctx.modes.iter().rev().cloned().collect() })),
             Op::Copy { .. }
             | Op::Duplicate { .. }
             | Op::NewFolder { .. }

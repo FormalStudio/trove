@@ -380,5 +380,27 @@ fn each_sidebar_row_has_its_own_menu_and_a_middle_click_opens_a_tab() {
 fn the_empty_space_menu_offers_new_items_and_view_options() {
     let mut h = Harness::new(&["a.txt"]);
     let menu = h.menu_on("files");
-    assert_eq!(menu, ["New folder", "New file", "Paste", "-", "Show hidden files", "Sort by >", "View >"], "{menu:?}");
+    let want = [
+        "New folder",
+        "New file",
+        "Paste",
+        "-",
+        "Open in terminal",
+        "-",
+        "Show hidden files",
+        "Sort by >",
+        "View >",
+        "-",
+        "Properties\u{2026}",
+    ];
+    assert_eq!(menu, want, "{menu:?}");
+}
+
+#[test]
+fn a_path_bar_segment_has_its_own_menu() {
+    let mut h = Harness::new(&["a.txt"]);
+    let menu = h.menu_on("crumb-current");
+    assert_eq!(menu, ["Open in new tab", "Open in terminal", "Copy path", "-", "Folders beside it >"], "{menu:?}");
+    let menu = h.menu_on("crumb-drop-0");
+    assert_eq!(menu[..3], ["Open in new tab", "Open in terminal", "Copy path"], "{menu:?}");
 }

@@ -7646,6 +7646,7 @@ dependencies = [
  "libc",
  "mime_guess",
  "percent-encoding",
+ "regex",
  "tempfile",
  "zip 9.2.1",
 ]

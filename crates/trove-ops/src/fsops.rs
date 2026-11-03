@@ -508,6 +508,33 @@ pub(crate) fn rename(ctx: &mut Ctx, path: &Path, new_name: &str) -> R<()> {
     Ok(())
 }
 
+pub(crate) fn rename_many(ctx: &mut Ctx, renames: &[(PathBuf, String)]) -> R<()> {
+    ctx.total_files = renames.len() as u64;
+    for (path, name) in renames {
+        ctx.check_cancel()?;
+        ctx.set_current(path);
+        rename(ctx, path, name)?;
+        ctx.finish_item();
+    }
+    Ok(())
+}
+
+pub(crate) fn set_modes(ctx: &mut Ctx, modes: &[(PathBuf, u32)]) -> R<()> {
+    ctx.total_files = modes.len() as u64;
+    for (path, bits) in modes {
+        ctx.check_cancel()?;
+        ctx.set_current(path);
+        let before = fs::metadata(path).at(path)?.mode() & 0o7777;
+        let after = bits & 0o7777;
+        if before != after {
+            fs::set_permissions(path, fs::Permissions::from_mode(after)).at(path)?;
+            ctx.modes.push((path.clone(), before));
+        }
+        ctx.finish_item();
+    }
+    Ok(())
+}
+
 pub(crate) fn create(ctx: &mut Ctx, parent: &Path, name: &str, folder: bool) -> R<()> {
     if name.is_empty() || name.contains('/') || name.contains('\0') || name == "." || name == ".." {
         return fail(format!("\"{name}\" is not a valid name"));

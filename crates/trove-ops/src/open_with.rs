@@ -8,7 +8,7 @@ use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 
 pub use crate::desktop::{AppInfo, Env, Registry};
-use crate::desktop::{Launch, expand_exec, in_terminal, set_default_text};
+use crate::desktop::{Launch, expand_exec, in_terminal, set_default_text, terminal_in};
 use crate::job::io_message;
 
 const SNIFF_BYTES: usize = 8192;
@@ -84,6 +84,11 @@ pub fn open(paths: &[PathBuf]) -> Result<(), String> {
 /// Opens `paths` with `app`, expanding the Exec line's field codes.
 pub fn open_with(app: &AppInfo, paths: &[PathBuf]) -> Result<(), String> {
     launch_app(&registry().env, app, paths, &spawn_detached)
+}
+
+/// Opens the user's terminal in `dir`.
+pub fn open_terminal(dir: &Path) -> Result<(), String> {
+    spawn_detached(&terminal_in(&Env::from_env(), dir)?)
 }
 
 /// Makes `app` the default for `mime` in `~/.config/mimeapps.list`.
@@ -162,7 +167,7 @@ fn fallback_open(env: &Env, files: &[PathBuf], launch: Launcher<'_>) -> Result<(
     for file in files {
         let mut argv: Vec<String> = base.iter().map(|s| (*s).to_owned()).collect();
         argv.push(file.to_string_lossy().into_owned());
-        launch(&Launch { argv, env: Vec::new() })?;
+        launch(&Launch { argv, ..Launch::default() })?;
     }
     Ok(())
 }
@@ -175,6 +180,9 @@ fn spawn_detached(launch: &Launch) -> Result<(), String> {
     };
     let mut cmd = Command::new(program);
     cmd.args(args).envs(launch.env.iter().cloned()).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+    if let Some(dir) = &launch.cwd {
+        cmd.current_dir(dir);
+    }
     // SAFETY: setsid is async-signal-safe and the closure touches nothing else.
     unsafe {
         cmd.pre_exec(|| {

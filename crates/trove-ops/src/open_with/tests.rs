@@ -5,7 +5,9 @@ use std::path::{Path, PathBuf};
 use tempfile::TempDir;
 
 use super::*;
-use crate::desktop::{Launch, expand_exec as expand_launches, in_terminal, set_default_text, tokenize_exec};
+use crate::desktop::{
+    Launch, expand_exec as expand_launches, in_terminal, set_default_text, terminal_in, tokenize_exec,
+};
 
 struct Fixture {
     root: TempDir,
@@ -136,6 +138,31 @@ fn terminal_apps_are_wrapped() {
     assert_eq!(in_terminal(&env, cmd()).unwrap(), ["alacritty", "--class", "x", "htop"]);
     env.terminal = Some("wezterm".into());
     assert_eq!(in_terminal(&env, cmd()).unwrap(), ["wezterm", "start", "--", "htop"]);
+}
+
+#[test]
+fn a_terminal_opens_on_a_folder() {
+    let f = Fixture::new();
+    let mut env = f.env();
+    let dir = Path::new("/home/me/My Docs");
+    assert!(terminal_in(&env, dir).is_err());
+    f.tool("xterm");
+    let t = terminal_in(&env, dir).unwrap();
+    assert_eq!(t.argv, ["xterm"]);
+    assert_eq!(t.cwd.as_deref(), Some(dir), "every terminal starts in the folder");
+    f.tool("ghostty");
+    assert_eq!(terminal_in(&env, dir).unwrap().argv, ["ghostty", "--working-directory=/home/me/My Docs"]);
+    f.tool("foot");
+    assert_eq!(terminal_in(&env, dir).unwrap().argv, ["foot", "--working-directory=/home/me/My Docs"]);
+    f.tool("xdg-terminal-exec");
+    assert_eq!(terminal_in(&env, dir).unwrap().argv, ["xdg-terminal-exec"], "the session's default terminal wins");
+    assert_eq!(in_terminal(&env, vec!["htop".into()]).unwrap(), ["xdg-terminal-exec", "htop"]);
+    env.terminal = Some("kitty --single-instance".into());
+    assert_eq!(
+        terminal_in(&env, dir).unwrap().argv,
+        ["kitty", "--single-instance", "--directory", "/home/me/My Docs"],
+        "$TERMINAL wins over both"
+    );
 }
 
 #[test]

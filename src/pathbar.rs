@@ -3,6 +3,7 @@
 //! segment turns it into a field holding the path, with Tab completing the last component from
 //! a readdir off the main thread.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
@@ -19,6 +20,8 @@ type OnGo = Rc<dyn Fn(Location, &mut Window, &mut App)>;
 
 /// More segments than this fold the middle ones into the menu.
 const MAX_SEGMENTS: usize = 5;
+/// The most folders a segment's menu lists beside it.
+const MAX_SIBLINGS: usize = 100;
 pub const FIELD: &str = "path-edit";
 
 #[derive(Clone, Debug, PartialEq)]
@@ -35,6 +38,10 @@ pub struct PathBar {
     completion: u64,
     volumes: Vec<Volume>,
     on_go: OnGo,
+    /// The subfolders of each folder on the path, for the segments' menus, and the location
+    /// they were read for.
+    siblings: HashMap<PathBuf, Vec<String>>,
+    siblings_of: Option<Location>,
 }
 
 impl PathBar {
@@ -46,6 +53,8 @@ impl PathBar {
             completion: 0,
             volumes: Vec::new(),
             on_go: Rc::new(on_go),
+            siblings: HashMap::new(),
+            siblings_of: None,
         }
     }
 
@@ -134,6 +143,56 @@ impl PathBar {
 
     pub fn segments(&self) -> Vec<Segment> {
         segments(&self.location, &self.volumes)
+    }
+
+    /// The folders beside `dir`, its own name among them; `None` until they have been read.
+    pub fn siblings(&self, dir: &Path) -> Option<&[String]> {
+        self.siblings.get(dir.parent()?).map(Vec::as_slice)
+    }
+
+    /// Reads the subfolders of every folder above the location, off the main thread, once per
+    /// location.
+    fn read_siblings(&mut self, cx: &mut Context<Self>) {
+        if self.siblings_of.as_ref() == Some(&self.location) {
+            return;
+        }
+        self.siblings_of = Some(self.location.clone());
+        let Some(dir) = self.location.dir() else { return };
+        let parents: Vec<PathBuf> = dir.ancestors().skip(1).map(Path::to_path_buf).collect();
+        let current = dir.to_path_buf();
+        let asked = self.location.clone();
+        crate::ops::background(
+            cx.weak_entity(),
+            move || parents.into_iter().map(|p| (subfolders(&p, &current), p)).collect::<Vec<_>>(),
+            move |this: &mut PathBar, found, cx| {
+                if this.siblings_of.as_ref() == Some(&asked) {
+                    this.siblings = found.into_iter().map(|(names, p)| (p, names)).collect();
+                    cx.notify();
+                }
+            },
+        );
+    }
+}
+
+/// `dir`'s subfolders in natural order, the hidden ones left out unless `on` passes through one.
+fn subfolders(dir: &Path, on: &Path) -> Vec<String> {
+    let Ok(rd) = std::fs::read_dir(dir) else { return Vec::new() };
+    let mut names: Vec<String> = rd
+        .filter_map(Result::ok)
+        .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()) || e.path().is_dir())
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| !n.starts_with('.') || on.starts_with(dir.join(n)))
+        .collect();
+    names.sort_by(|a, b| trove_fs::natural_cmp(a, b));
+    names.truncate(MAX_SIBLINGS);
+    names
+}
+
+/// A segment's right-click menu, read from the path bar when it opens.
+fn crumb_menu(bar: WeakEntity<PathBar>, dir: PathBuf) -> impl Fn(ContextMenu, &mut Window, &mut App) -> ContextMenu {
+    move |menu, _, cx| {
+        let siblings = bar.upgrade().and_then(|b| b.read(cx).siblings(&dir).map(<[String]>::to_vec));
+        crate::menus::crumb(menu, &dir, siblings.as_deref())
     }
 }
 
@@ -242,6 +301,7 @@ fn fold(segments: &[Segment]) -> (Vec<(usize, &Segment)>, Vec<&Segment>) {
 
 impl Render for PathBar {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.read_siblings(cx);
         let theme = cx.theme();
         if self.editing {
             let (change, submit) = (cx.weak_entity(), cx.weak_entity());
@@ -288,9 +348,11 @@ impl Render for PathBar {
                     .child(icon(Icon::ChevronRight, 12.).text_color(theme.text.tertiary));
             }
             if *i == last {
+                let menu = seg.location.dir().map(|d| crumb_menu(cx.weak_entity(), d.to_path_buf()));
                 row = row.child(
                     h_flex()
                         .id("crumb-current")
+                        .when_some(menu, |d, menu| d.context_menu(menu))
                         .gap(theme.spacing.xs)
                         .px(theme.spacing.xs)
                         .when_some(seg.icon, |d, glyph| d.child(icon(glyph, 16.).text_color(theme.text.primary)))
@@ -314,6 +376,7 @@ impl Render for PathBar {
                     Some(dest) => {
                         let tab_dest = dest.clone();
                         crumb
+                            .context_menu(crumb_menu(cx.weak_entity(), dest.clone()))
                             .on_middle_click(move |_: &MiddleClickEvent, window, cx| {
                                 cx.dispatch_action(window.id(), &OpenPlaceInNewTab(Location::Dir(tab_dest.clone())));
                             })

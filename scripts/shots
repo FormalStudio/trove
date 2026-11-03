@@ -7,8 +7,9 @@
 #
 # linux runs tests/real_shots.rs: a release build inside nd's private headless Hyprland, never
 # the session you are in. It writes docs/shots/linux.png (dark), linux-light.png and
-# docs/images/{list,grid,search,quicklook,columns}.png. macos and windows are not captured yet;
-# `all` skips them and says so.
+# docs/images/{list,grid,search,quicklook,columns}.png, plus the Properties and batch rename
+# sheets in artifacts/shots/sheets/ for review (not copied into docs). macos and windows are not
+# captured yet; `all` skips them and says so.
 set -euo pipefail
 
 root=$(cd "$(dirname "$0")/.." && pwd)
@@ -35,7 +36,7 @@ case "${1:-}" in
     echo "macos and windows shots are not captured yet" >&2
     ;;
   *)
-    sed -n '2,11p' "$0"
+    sed -n '2,12p' "$0"
     exit 2
     ;;
 esac

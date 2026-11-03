@@ -1,19 +1,21 @@
 //! File operations: copy, move, trash, delete, rename, new folder, with progress, conflicts and undo.
 
 mod archive;
+pub mod batch;
 pub mod clipboard;
 mod desktop;
 mod fsops;
 mod job;
 mod names;
 pub mod open_with;
+pub mod props;
 mod queue;
 pub mod trash;
 
 use std::path::PathBuf;
 
 pub use clipboard::{copy_files, paste_files};
-pub use open_with::{AppInfo, apps_for, mime_of, open, open_with, set_default};
+pub use open_with::{AppInfo, apps_for, mime_of, open, open_terminal, open_with, set_default};
 pub use queue::{Config, Ops};
 pub use trash::TrashConfig;
 
@@ -68,6 +70,15 @@ pub enum Op {
     Extract {
         archive: PathBuf,
         dest_dir: PathBuf,
+    },
+    /// Each path's permission bits (the low 12 bits of its mode) set to the value beside it.
+    /// A link is followed, as chmod(1) does.
+    SetPermissions {
+        modes: Vec<(PathBuf, u32)>,
+    },
+    /// Renames in one job, undone together. A name that is taken fails the job where it is.
+    RenameMany {
+        renames: Vec<(PathBuf, String)>,
     },
 }
 

@@ -292,7 +292,13 @@ impl Jobs {
     fn shows(&self, job: JobId) -> bool {
         !matches!(
             self.tracked.get(&job).and_then(|t| t.op.as_ref()),
-            Some(Op::Rename { .. } | Op::NewFolder { .. } | Op::NewFile { .. })
+            Some(
+                Op::Rename { .. }
+                    | Op::RenameMany { .. }
+                    | Op::SetPermissions { .. }
+                    | Op::NewFolder { .. }
+                    | Op::NewFile { .. }
+            )
         )
     }
 
@@ -398,7 +404,8 @@ fn verb(op: &Op) -> &'static str {
         Op::Move { .. } => "Could not move",
         Op::Trash { .. } => "Could not move to Trash",
         Op::Delete { .. } => "Could not delete",
-        Op::Rename { .. } => "Could not rename",
+        Op::Rename { .. } | Op::RenameMany { .. } => "Could not rename",
+        Op::SetPermissions { .. } => "Could not change permissions",
         Op::NewFolder { .. } => "Could not create the folder",
         Op::NewFile { .. } => "Could not create the file",
         Op::Restore { .. } => "Could not restore",
