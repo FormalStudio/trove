@@ -1,5 +1,5 @@
 //! The portal and FileManager1 services on a private bus: a `dbus-daemon` of the test's own,
-//! never the session's, with a shell script standing in for `trove --pick` and `trove <path>`.
+//! never the session's, with a shell script standing in for `trove --pick`.
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
 use std::collections::HashMap;
@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 
 use futures_lite::future;
 use trove::picker::{Mode, Request};
-use trove::portal::{FILE_MANAGER_NAME, FILE_MANAGER_PATH, PORTAL_NAME, PORTAL_PATH, Results, Service};
+use trove::portal::{PORTAL_NAME, PORTAL_PATH, Results, Service};
 use zbus::zvariant::{ObjectPath, Value};
 
 const CHOOSER: &str = "org.freedesktop.impl.portal.FileChooser";
@@ -192,22 +192,17 @@ fn close_on_the_request_ends_the_picker() {
 }
 
 #[test]
-fn file_manager_opens_one_window_per_request() {
+fn file_manager_turns_each_call_into_one_window() {
+    use std::path::PathBuf;
+    use trove::file_manager::{NAME, PATH, Show};
     let bus = Bus::start();
-    let dir = tempfile::tempdir().expect("a temp dir");
-    let body = "printf '%s|' \"$@\" \"$XDG_ACTIVATION_TOKEN\" >> \"$DIR/shown\"\necho >> \"$DIR/shown\"";
-    let _service = serve(&bus, stub(dir.path(), body));
+    let (shows, calls) = flume::unbounded();
+    let _served = async_io::block_on(trove::file_manager::serve(bus.connect(), shows)).expect("the service starts");
     let conn = client(&bus);
     let call = |method: &str, uris: &[&str]| {
         let uris: Vec<&str> = uris.to_vec();
-        async_io::block_on(conn.call_method(
-            Some(FILE_MANAGER_NAME),
-            FILE_MANAGER_PATH,
-            Some("org.freedesktop.FileManager1"),
-            method,
-            &(uris, "token-1"),
-        ))
-        .expect("answered");
+        async_io::block_on(conn.call_method(Some(NAME), PATH, Some(NAME), method, &(uris, "token-1")))
+            .expect("answered");
     };
     call(
         "ShowItems",
@@ -216,18 +211,19 @@ fn file_manager_opens_one_window_per_request() {
     call("ShowFolders", &["file:///home", "file:///srv"]);
     call("ShowItems", &["https://example.com/only"]);
     call("ShowItemProperties", &["file:///srv/a%20b/one.txt"]);
-    let shown = dir.path().join("shown");
-    let lines = || std::fs::read_to_string(&shown).unwrap_or_default().lines().map(str::to_owned).collect::<Vec<_>>();
-    async_io::block_on(until(|| lines().len() >= 3));
-    let mut got = lines();
-    got.sort();
+    let paths = |ps: &[&str]| ps.iter().map(PathBuf::from).collect::<Vec<_>>();
+    let got: Vec<Show> = calls.drain().collect();
     assert_eq!(
         got,
         [
-            "--properties|/srv/a b/one.txt|token-1|",
-            "--select|/srv/a b/one.txt|/srv/a b/two.txt|/opt/three|token-1|",
-            "/home|/srv|token-1|"
+            Show::Items(paths(&["/srv/a b/one.txt", "/srv/a b/two.txt", "/opt/three"])),
+            Show::Folders(paths(&["/home", "/srv"])),
+            Show::Properties(paths(&["/srv/a b/one.txt"])),
         ],
-        "every item in one window, the remote one left out; a request with nothing local opens none"
+        "every item of a call in one window, the remote one left out; a call with nothing local opens none"
     );
+
+    let (shows, _calls) = flume::unbounded();
+    let second = async_io::block_on(trove::file_manager::serve(bus.connect(), shows));
+    assert!(matches!(second, Err(zbus::Error::NameTaken)), "a second Trove leaves the name to the first");
 }

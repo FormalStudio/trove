@@ -6,8 +6,11 @@
 //!   (`tests/portal_caller.py`) asks the portal for a file over its window. The picker runs on
 //!   XWayland too, names the caller's window in WM_TRANSIENT_FOR, Hyprland maps it as a modal X11
 //!   window stacked over the caller, and Escape answers the caller "cancelled".
-//! - `real_show_item_properties`: `FileManager1.ShowItemProperties` on a file opens a Trove
-//!   window with the Properties sheet over it.
+//! - `real_show_item_properties`: `FileManager1.ShowItemProperties` on a file, served by `trove
+//!   --file-manager` (what D-Bus starts with no Trove running), opens a Trove window with the
+//!   Properties sheet over it.
+//! - `real_running_trove_shows_items`: with Trove already open, `ShowItems` lands in that process
+//!   as a second window of its own (the frame shows the item selected).
 //!
 //! Frames and logs land in `artifacts/portal/`. Needs xdg-desktop-portal, python3-gobject with
 //! GTK 3, xprop and grim. It opens real windows, so it runs only under nextest or with `ND_REAL=1`.
@@ -21,7 +24,8 @@ use std::time::{Duration, Instant};
 
 use ndshell::hyprland::{Hyprland, Options};
 use ndshell::wayland::{VirtualInput, keys};
-use trove::portal::{FILE_MANAGER_NAME, FILE_MANAGER_PATH, PORTAL_NAME};
+use trove::file_manager::{NAME as FILE_MANAGER_NAME, PATH as FILE_MANAGER_PATH};
+use trove::portal::PORTAL_NAME;
 
 const PORTAL_FRONTEND: &str = "org.freedesktop.portal.Desktop";
 const APP_ID: &str = "dev.formalsnake.trove";
@@ -99,7 +103,6 @@ impl Desktop {
         let mut portal = this.command(bin());
         portal.arg("--portal");
         this.spawn(portal, "trove-portal");
-        this.wait_name(FILE_MANAGER_NAME);
         this.wait_name(PORTAL_NAME);
         this
     }
@@ -156,6 +159,19 @@ impl Desktop {
         frontend.arg("--verbose").env("XDG_DESKTOP_PORTAL_DIR", dir.join("portals"));
         self.spawn(frontend, "xdg-desktop-portal");
         self.wait_name(PORTAL_FRONTEND);
+    }
+
+    /// `FileManager1.<method>` on `item`, as a browser's "Show in folder" sends it.
+    fn show(&self, method: &str, item: &Path) {
+        let uri = format!("file://{}", item.display());
+        async_io::block_on(self.connection().call_method(
+            Some(FILE_MANAGER_NAME),
+            FILE_MANAGER_PATH,
+            Some(FILE_MANAGER_NAME),
+            method,
+            &(vec![uri.as_str()], ""),
+        ))
+        .unwrap();
     }
 
     fn clients(&self) -> Vec<serde_json::Value> {
@@ -318,18 +334,13 @@ fn real_show_item_properties() {
         println!("skipped: opens real windows; run with ND_REAL=1");
         return;
     }
-    let desktop = Desktop::start(false);
+    let mut desktop = Desktop::start(false);
+    let mut service = desktop.command(bin());
+    service.arg("--file-manager");
+    desktop.spawn(service, "trove-file-manager");
+    desktop.wait_name(FILE_MANAGER_NAME);
     let item = desktop.dir.path().join("home/Reports/q3.txt");
-    let conn = desktop.connection();
-    let uri = format!("file://{}", item.display());
-    async_io::block_on(conn.call_method(
-        Some(FILE_MANAGER_NAME),
-        FILE_MANAGER_PATH,
-        Some("org.freedesktop.FileManager1"),
-        "ShowItemProperties",
-        &(vec![uri.as_str()], ""),
-    ))
-    .unwrap();
+    desktop.show("ShowItemProperties", &item);
     // The window and the Properties sheet, a window of its own over it.
     let mut windows = desktop.wait_windows(APP_ID, 2, Duration::from_secs(30));
     windows.sort_by_key(|w| -(bounds(w).2 * bounds(w).3));
@@ -344,4 +355,31 @@ fn real_show_item_properties() {
     assert_eq!(windows[0]["pid"], windows[1]["pid"], "the sheet belongs to another process");
     let ((x, y, w, h), (sx, sy, sw, sh)) = (bounds(&windows[0]), bounds(&windows[1]));
     assert!(sx >= x && sy >= y && sx + sw <= x + w && sy + sh <= y + h, "the sheet is not over its window");
+}
+
+#[test]
+fn real_running_trove_shows_items() {
+    if !real_allowed() {
+        println!("skipped: opens real windows; run with ND_REAL=1");
+        return;
+    }
+    let mut desktop = Desktop::start(false);
+    let home = desktop.dir.path().join("home");
+    let mut trove = desktop.command(bin());
+    trove.arg(&home);
+    desktop.spawn(trove, "trove-running");
+    desktop.wait_name(FILE_MANAGER_NAME);
+    let first = desktop.wait_windows(APP_ID, 1, Duration::from_secs(30));
+    desktop.show("ShowItems", &home.join("Reports/q3.txt"));
+    let windows = desktop.wait_windows(APP_ID, 2, Duration::from_secs(30));
+    for w in &windows {
+        println!("window {}", summary(w));
+    }
+    desktop.screenshot("show-items-running");
+    let pid = first[0]["pid"].clone();
+    for w in &windows {
+        kill_window_process(w["pid"].as_i64().unwrap_or(-1));
+    }
+    assert_eq!(windows.len(), 2, "the running window and one for the call");
+    assert!(windows.iter().all(|w| w["pid"] == pid), "the call started another process: {windows:#?}");
 }

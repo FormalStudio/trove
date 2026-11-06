@@ -9,6 +9,7 @@ mod conflict;
 mod demo;
 mod env;
 mod extras;
+pub mod file_manager;
 mod fileops;
 mod format;
 mod icons;
@@ -281,13 +282,19 @@ pub fn start_from(args: Vec<std::ffi::OsString>) -> (Start, Vec<PathBuf>) {
         .skip(usize::from(items))
         .map(|a| std::path::absolute(arg_path(a)).unwrap_or_default())
         .collect();
-    let start = match (items, paths.len()) {
-        (_, 0) => Start::Home,
-        (true, _) => Start::Places(items_by_folder(paths.clone())),
-        (false, 1) => paths.first().cloned().map_or(Start::Home, Start::Path),
-        (false, _) => Start::Places(paths.iter().cloned().map(Place::Path).collect()),
-    };
+    let start = start_for(items, paths.clone());
     (start, if properties { paths } else { Vec::new() })
+}
+
+/// A window on `paths`: with `items`, each shown selected in its folder; otherwise a tab on
+/// each. None starts at home.
+pub(crate) fn start_for(items: bool, paths: Vec<PathBuf>) -> Start {
+    match (items, paths.len()) {
+        (_, 0) => Start::Home,
+        (true, _) => Start::Places(items_by_folder(paths)),
+        (false, 1) => paths.into_iter().next().map_or(Start::Home, Start::Path),
+        (false, _) => Start::Places(paths.into_iter().map(Place::Path).collect()),
+    }
 }
 
 pub fn run() -> nd::Result<()> {
@@ -300,6 +307,14 @@ pub fn run() -> nd::Result<()> {
             }
             return Ok(());
         }
+        Some("--file-manager") => {
+            trace::init();
+            pump::set_live();
+            return app().run(|cx| {
+                init(cx);
+                file_manager::start(cx, true);
+            });
+        }
         _ => {}
     }
     trace::init();
@@ -310,6 +325,7 @@ pub fn run() -> nd::Result<()> {
         if !properties.is_empty() {
             properties::open(cx, window.id(), properties.clone());
         }
+        file_manager::start(cx, false);
     })
 }
 

@@ -1,10 +1,8 @@
 //! `trove --portal`: the D-Bus service that makes Trove the desktop's file chooser
-//! (`org.freedesktop.impl.portal.FileChooser`, behind xdg-desktop-portal) and its file manager
-//! (`org.freedesktop.FileManager1`, "Show in folder"). It draws nothing: each pick runs a
-//! `trove --pick` process and reads its outcome over a pipe, and each request to show files is
-//! a `trove` window of its own (`trove --select <item>...`, `--properties <item>...`, `trove
-//! <folder>...`), so a crash in a window never takes the service down. D-Bus starts it on the
-//! first call and it exits once idle.
+//! (`org.freedesktop.impl.portal.FileChooser`, behind xdg-desktop-portal). It draws nothing:
+//! each pick runs a `trove --pick` process and reads its outcome over a pipe, so a crash in a
+//! picker never takes the service down. D-Bus starts it on the first call and it exits once
+//! idle. "Show in folder" is the app's own (`file_manager`).
 
 use std::path::PathBuf;
 use std::process::Stdio;
@@ -21,9 +19,7 @@ use zbus::{connection, interface};
 use crate::picker::{ChoiceBox, Filter, Mode, Outcome, Request};
 
 pub const PORTAL_NAME: &str = "org.freedesktop.impl.portal.desktop.trove";
-pub const FILE_MANAGER_NAME: &str = "org.freedesktop.FileManager1";
 pub const PORTAL_PATH: &str = "/org/freedesktop/portal/desktop";
-pub const FILE_MANAGER_PATH: &str = "/org/freedesktop/FileManager1";
 
 /// How long the service waits with nothing open before it exits; D-Bus starts it again.
 const IDLE: Duration = Duration::from_secs(300);
@@ -96,7 +92,6 @@ fn on_x_server(parent_window: &str, display: Option<std::ffi::OsString>) -> bool
 }
 
 /// What runs a pick: `program --pick`, the request on its stdin and the outcome on its stdout.
-/// Showing a folder runs `program <path>`.
 #[derive(Clone)]
 struct Launcher {
     program: PathBuf,
@@ -158,34 +153,6 @@ impl Launcher {
             // The window was closed without an answer.
             None if output.status.success() => (CANCELLED, None),
             None => (OTHER, None),
-        }
-    }
-
-    /// A Trove window with `args` (`--select` and items, or folders), handed the caller's
-    /// activation token so the compositor lets it take focus.
-    fn show(&self, args: &[&std::ffi::OsStr], startup_id: &str) {
-        let mut cmd = std::process::Command::new(&self.program);
-        cmd.args(args).stdin(Stdio::null());
-        if !startup_id.is_empty() {
-            cmd.env("XDG_ACTIVATION_TOKEN", startup_id).env("DESKTOP_STARTUP_ID", startup_id);
-        }
-        match cmd.spawn() {
-            // Reaped on a thread of its own: the window lives as long as the user keeps it.
-            Ok(mut child) => {
-                let _ = std::thread::Builder::new().name("trove-window".into()).spawn(move || child.wait());
-            }
-            Err(e) => eprintln!("trove: opening a window: {e}"),
-        }
-    }
-
-    /// A window over the local ones of `uris` behind `flag` (`--select` or `--properties`);
-    /// none when no item is local.
-    fn show_items(&self, flag: &str, uris: &[String], startup_id: &str) {
-        let _busy = self.hold();
-        let items = paths(uris);
-        if !items.is_empty() {
-            let args = std::iter::once(flag.as_ref()).chain(items.iter().map(|p| p.as_os_str()));
-            self.show(&args.collect::<Vec<_>>(), startup_id);
         }
     }
 }
@@ -284,55 +251,15 @@ impl FileChooser {
     }
 }
 
-struct FileManager(Launcher);
-
-/// The local paths of `uris`; ones that are not `file://` are skipped.
-fn paths(uris: &[String]) -> Vec<PathBuf> {
-    uris.iter().filter_map(|u| trove_fs::uri_path(u)).collect()
-}
-
-/// One window for a whole request: a tab per folder, each with its items selected.
-#[interface(name = "org.freedesktop.FileManager1")]
-impl FileManager {
-    fn show_folders(&self, uris: Vec<String>, startup_id: String) {
-        let _busy = self.0.hold();
-        let folders = paths(&uris);
-        if !folders.is_empty() {
-            self.0.show(&folders.iter().map(|p| p.as_os_str()).collect::<Vec<_>>(), &startup_id);
-        }
-    }
-
-    fn show_items(&self, uris: Vec<String>, startup_id: String) {
-        self.0.show_items("--select", &uris, &startup_id);
-    }
-
-    /// The items shown as `ShowItems` does, with the Properties sheet over them.
-    fn show_item_properties(&self, uris: Vec<String>, startup_id: String) {
-        self.0.show_items("--properties", &uris, &startup_id);
-    }
-}
-
-/// Serves both interfaces on `builder`'s bus and asks for both names. A name another process
-/// holds (a running file manager owning FileManager1) is left to it. The connection serves
-/// for as long as it is kept.
+/// Serves the file chooser on `builder`'s bus and asks for its name. The connection serves for
+/// as long as it is kept.
 pub async fn serve(builder: connection::Builder<'_>, program: PathBuf) -> zbus::Result<Service> {
     let (touched, idle) = flume::unbounded();
     let launcher = Launcher { program, busy: Arc::new(AtomicUsize::new(0)), touched };
-    let conn = builder
-        .serve_at(PORTAL_PATH, FileChooser(launcher.clone()))?
-        .serve_at(FILE_MANAGER_PATH, FileManager(launcher.clone()))?
-        .build()
-        .await?;
-    let mut owned = 0;
-    for name in [PORTAL_NAME, FILE_MANAGER_NAME] {
-        match conn.request_name_with_flags(name, RequestNameFlags::DoNotQueue.into()).await {
-            Ok(RequestNameReply::PrimaryOwner | RequestNameReply::AlreadyOwner) => owned += 1,
-            Ok(_) => eprintln!("trove: {name} has another owner"),
-            Err(e) => eprintln!("trove: asking for {name}: {e}"),
-        }
-    }
-    if owned == 0 {
-        return Err(zbus::Error::NameTaken);
+    let conn = builder.serve_at(PORTAL_PATH, FileChooser(launcher.clone()))?.build().await?;
+    match conn.request_name_with_flags(PORTAL_NAME, RequestNameFlags::DoNotQueue.into()).await? {
+        RequestNameReply::PrimaryOwner | RequestNameReply::AlreadyOwner => {}
+        _ => return Err(zbus::Error::NameTaken),
     }
     Ok(Service { conn, busy: launcher.busy, idle })
 }

@@ -71,9 +71,10 @@ install -Dm644 packaging/linux/dev.formalsnake.trove.png ~/.local/share/icons/hi
 ### As the system file chooser
 
 `trove --portal` is a D-Bus service: xdg-desktop-portal's FileChooser backend, so apps' Open
-and Save dialogs open a Trove window, and `org.freedesktop.FileManager1`, so "Show in folder"
-in a browser opens Trove with the file selected. D-Bus starts it on demand. To install it next
-to the binary above:
+and Save dialogs open a Trove window. Trove is also `org.freedesktop.FileManager1`, so "Show in
+folder" in a browser opens Trove with the file selected: a running Trove opens the window
+itself, and with none running D-Bus starts `trove --file-manager`. To install both next to the
+binary above:
 
 ```sh
 mkdir -p ~/.local/share/dbus-1/services
