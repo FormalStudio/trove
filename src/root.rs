@@ -183,6 +183,7 @@ impl Root {
         let view = match prefs.default_view {
             crate::settings::DefaultView::List => View::List,
             crate::settings::DefaultView::Grid => View::Grid,
+            crate::settings::DefaultView::Columns => View::Columns,
         };
         let mut active = 0;
         match start {
@@ -327,13 +328,13 @@ impl Root {
 
     fn make_tab(&mut self, location: Location, view: View, cx: &mut Context<Self>) -> Entity<Tab> {
         let show_hidden = self.show_hidden;
-        let folders_first = crate::settings::get(cx).folders_first;
+        let sort = crate::settings::get(cx).sort();
         let window = self.window;
         let shown = self.picker.as_ref().map(|p| Rc::new(p.read(cx).shown()));
         let tab = cx.new(|cx| {
             let mut t = Tab::new(location, show_hidden, view, cx);
             t.set_window(window);
-            t.set_folders_first(folders_first, cx);
+            t.set_folder_sort(sort, cx);
             if let Some(shown) = shown {
                 t.set_pick(shown, cx);
             }

@@ -799,10 +799,13 @@ impl Tab {
 
     /// Folders before files in a folder's sort, or mixed in. Recent keeps its date order.
     pub fn set_folders_first(&mut self, on: bool, cx: &mut Context<Self>) {
-        if self.sort.folders_first == on {
-            return;
+        if self.sort.folders_first != on {
+            self.set_folder_sort(SortOrder { folders_first: on, ..self.sort }, cx);
         }
-        let sort = SortOrder { folders_first: on, ..self.sort };
+    }
+
+    /// The sort the tab's folders show in. Recent keeps its date order.
+    pub fn set_folder_sort(&mut self, sort: SortOrder, cx: &mut Context<Self>) {
         if self.location == Location::Recent {
             self.sort = sort;
         } else {

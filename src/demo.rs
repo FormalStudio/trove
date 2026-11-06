@@ -163,6 +163,11 @@ pub fn ensure_at(root: PathBuf) -> io::Result<PathBuf> {
         let at = SystemTime::UNIX_EPOCH + Duration::from_secs(MARCH + n * 3_600);
         write(&root.join(format!("Logs/build {n}.log")), 600 + n * 37, at)?;
     }
+    // The fixture lists by name whatever the shipped default sort is, so its rows and goldens
+    // hold. A drop-in, since tests write config.toml themselves.
+    let settings = root.join(".config/trove/config.d");
+    fs::create_dir_all(&settings)?;
+    fs::write(settings.join("demo.toml"), "default_sort = \"name\"\ndefault_sort_order = \"ascending\"\n")?;
     for dir in ["Desktop", "Documents", "Downloads", "Pictures", "Projects", "Projects/trove", "Logs"] {
         set_mtime(&root.join(dir), stamp(When::DaysAgo(0, 9, 0), midnight))?;
     }

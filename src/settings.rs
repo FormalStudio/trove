@@ -6,6 +6,7 @@ use std::sync::Arc;
 use nd::prelude::*;
 use nd::settings::{Event, Options, SettingsHandle, WatchGuard};
 use serde::{Deserialize, Serialize};
+use trove_fs::{SortKey, SortOrder};
 
 #[derive(Settings, Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[schemars(crate = "nd::schemars")]
@@ -17,6 +18,10 @@ pub struct TroveSettings {
     pub folders_first: bool,
     /// The view a new tab opens in.
     pub default_view: DefaultView,
+    /// What a new tab sorts by. Created is when the file arrived at its path, such as a download.
+    pub default_sort: DefaultSort,
+    /// Which way a new tab sorts: descending puts the newest and largest first.
+    pub default_sort_order: SortDirection,
     /// Open folders and files with one click instead of two.
     pub single_click: bool,
     /// Ask before moving items to the Trash.
@@ -35,6 +40,41 @@ pub struct TroveSettings {
 pub enum DefaultView {
     List,
     Grid,
+    Columns,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[schemars(crate = "nd::schemars")]
+#[serde(rename_all = "kebab-case")]
+pub enum DefaultSort {
+    Name,
+    Size,
+    Kind,
+    Modified,
+    Created,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[schemars(crate = "nd::schemars")]
+#[serde(rename_all = "kebab-case")]
+pub enum SortDirection {
+    Ascending,
+    Descending,
+}
+
+impl TroveSettings {
+    /// The sort a new tab opens with.
+    pub fn sort(&self) -> SortOrder {
+        let key = match self.default_sort {
+            DefaultSort::Name => SortKey::Name,
+            DefaultSort::Size => SortKey::Size,
+            DefaultSort::Kind => SortKey::Kind,
+            DefaultSort::Modified => SortKey::Modified,
+            DefaultSort::Created => SortKey::Created,
+        };
+        let ascending = self.default_sort_order == SortDirection::Ascending;
+        SortOrder { key, ascending, folders_first: self.folders_first }
+    }
 }
 
 impl Default for TroveSettings {
@@ -43,6 +83,8 @@ impl Default for TroveSettings {
             show_hidden: false,
             folders_first: true,
             default_view: DefaultView::List,
+            default_sort: DefaultSort::Modified,
+            default_sort_order: SortDirection::Descending,
             single_click: false,
             confirm_trash: false,
             network_thumbnails: false,
