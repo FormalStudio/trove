@@ -735,24 +735,38 @@ impl Root {
         let field =
             search_field("search", &search).placeholder(format!("Search {title}")).key_context(SEARCH).w(px(240.));
         let toolbar = toolbar()
-            .hide_title()
             .navigation(icon_button("back", Icon::ChevronLeft).tooltip("Back").disabled(!can_back).dispatch(Back))
             .navigation(
                 icon_button("forward", Icon::ChevronRight).tooltip("Forward").disabled(!can_forward).dispatch(Forward),
-            )
-            .flexible_item(self.pathbar.clone());
+            );
+        // Where the toolbar shows the window's title (the folder's name), the controls sit at
+        // its trailing edge in groups of their own, as Finder's do, and the path bar goes under
+        // the files. Elsewhere the path bar is the header's middle.
+        let titled = titled_toolbar();
+        let group = |toolbar: Toolbar| if titled { toolbar.space() } else { toolbar };
+        let toolbar = if titled {
+            toolbar.title(title).flexible_space()
+        } else {
+            toolbar.hide_title().flexible_item(self.pathbar.clone())
+        };
         let toolbar =
             if self.files_w() >= VIEW_ROOM { toolbar.item(self.view_switch()) } else { toolbar.item(self.view_menu()) };
         // A header too narrow for the field keeps libadwaita's search toggle instead, its bar
         // opening under the header (Ctrl+F opens it too).
+        let toolbar = group(toolbar);
         let toolbar =
             if self.files_w() >= SEARCH_ROOM { toolbar.persistent_search(field) } else { toolbar.item(field) };
-        let toolbar = toolbar.item(
-            icon_button("preview-toggle", Icon::PanelRight)
-                .tooltip("Preview")
-                .checked(self.show_preview)
-                .dispatch(TogglePreview),
-        );
+        // The system's inspector toggle sits over the preview pane, at the window's trailing edge.
+        let toolbar = if titled {
+            toolbar.inspector_toggle()
+        } else {
+            toolbar.item(
+                icon_button("preview-toggle", Icon::PanelRight)
+                    .tooltip("Preview")
+                    .checked(self.show_preview)
+                    .dispatch(TogglePreview),
+            )
+        };
         let menu = if self.picker.is_some() { None } else { crate::app_menu::header_button(self.me()) };
         match menu {
             Some(button) => toolbar.item(button),
@@ -986,6 +1000,18 @@ impl Render for Root {
             self.preview.update(cx, |p, cx| p.set_width(preview_w, cx));
         }
         let tabs = (self.tabs.len() > 1).then(|| self.tab_strip(cx));
+        let path_row = titled_toolbar().then(|| {
+            let theme = cx.theme();
+            v_flex().w_full().child(separator()).child(
+                h_flex()
+                    .id("path-row")
+                    .w_full()
+                    .h(theme.control.small)
+                    .px(theme.spacing.md)
+                    .items_center()
+                    .child(self.pathbar.clone()),
+            )
+        });
         // The toolbar is built from the window's size, which a resize changes without asking
         // this view to render.
         let content = v_flex()
@@ -994,6 +1020,7 @@ impl Render for Root {
             .on_navigate(|e: &NavigateEvent, window, cx| history(e, window, cx))
             .children(tabs)
             .child(div().flex_1().min_h_0().child(self.active_tab().clone()))
+            .children(path_row)
             .child(self.status.clone())
             .children(self.picker.clone());
         let root = scaffold()
@@ -1036,6 +1063,11 @@ impl Render for Root {
             .overlay(self.quicklook.clone());
         self.actions(root, cx)
     }
+}
+
+/// Whether the window's toolbar shows the window's title, so the path bar sits under the files.
+fn titled_toolbar() -> bool {
+    nd::platform::has(nd::platform::Feature::ToolbarTitle)
 }
 
 /// The tab a strip id names: `tab-<n>`, as [`Root::tab_bar`] mints them.

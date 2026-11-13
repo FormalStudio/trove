@@ -542,6 +542,10 @@ fn plain(s: &str, hidden: bool) -> Span {
 impl Tab {
     fn result_cell(&mut self, (id, col): (EntryId, usize), _window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let size = self.row_size();
+        let picture = match self.extras.results.by_id.get(&id) {
+            Some(row) if col == 0 => crate::sysicons::icon(&row.path, row.is_dir, row.kind, size.art, cx),
+            _ => None,
+        };
         let theme = cx.theme();
         let Some(row) = self.extras.results.by_id.get(&id) else { return div().into_any_element() };
         let quiet = |s: String| {
@@ -557,7 +561,7 @@ impl Tab {
                 .gap(theme.spacing.sm)
                 .min_w_0()
                 .child(crate::thumbs::row_art(
-                    None,
+                    picture,
                     icons::for_kind(row.kind),
                     icons::tint(row.kind, theme),
                     size,

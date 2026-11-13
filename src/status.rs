@@ -215,11 +215,15 @@ impl Render for StatusBar {
         let size = self.tab.as_ref().map(|tab| {
             let tab = tab.read(cx);
             let (at, last) = tab.zoom().step_of(tab.view());
-            slider("status-zoom", at as f32).range(0. ..=last as f32).step(1.).label("Size").w(px(96.)).on_change(
-                |e: &SliderChanged, window, cx| {
+            slider("status-zoom", at as f32)
+                .range(0. ..=last as f32)
+                .step(1.)
+                .small()
+                .label("Size")
+                .w(px(96.))
+                .on_change(|e: &SliderChanged, window, cx| {
                     cx.dispatch_action(window.id(), &ZoomTo(e.value.round().max(0.) as usize));
-                },
-            )
+                })
         });
         v_flex()
             .w_full()

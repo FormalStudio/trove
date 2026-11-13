@@ -36,6 +36,8 @@ pub struct ShowInTrove(pub PathBuf);
 pub struct TrashMeasured(pub PathBuf);
 
 const ROW_H: f32 = 30.;
+/// The side of a row's icon where the OS draws it.
+const ICON: f32 = 16.;
 const LIST_W: f32 = 320.;
 const BAR_W: f32 = 48.;
 /// A file's rectangle carries its name from this size up.
@@ -75,6 +77,7 @@ pub struct UsageView {
     pending: Option<(JobId, PathBuf)>,
     error: Option<String>,
     _jobs: Subscription,
+    _icons: Option<Subscription>,
 }
 
 /// Opens the window and starts measuring `root`.
@@ -110,6 +113,12 @@ impl UsageView {
     pub fn new(root: PathBuf, window: WindowId, cx: &mut Context<Self>) -> Self {
         ops::init(cx);
         let jobs = cx.observe(&ops::jobs(cx), |this: &mut Self, jobs, cx| this.job_moved(&jobs, cx));
+        let icons = crate::sysicons::get(cx).map(|icons| {
+            cx.observe(&icons, |this: &mut Self, _, cx| {
+                this.list.invalidate_all(cx);
+                cx.notify();
+            })
+        });
         let stop = Arc::new(AtomicBool::new(false));
         let events = trove_fs::du_scan(root.clone(), stop.clone());
         let view = Self {
@@ -133,6 +142,7 @@ impl UsageView {
             pending: None,
             error: None,
             _jobs: jobs,
+            _icons: icons,
         };
         view.listen(cx);
         view
@@ -508,16 +518,26 @@ impl UsageView {
         if self.dev {
             return self.find_row(i, cx);
         }
+        let picture = self.path_of(i as usize).and_then(|path| {
+            let node = self.folder()?.children.get(i as usize)?;
+            let (is_dir, kind) = match node.kind {
+                DuKind::Dir => (true, FileKind::Folder),
+                DuKind::File(kind) => (false, kind),
+                DuKind::Rest => return None,
+            };
+            crate::sysicons::icon(&path, is_dir, kind, ICON, cx)
+        });
         let theme = cx.theme();
         let Some(folder) = self.folder() else { return div().into_any_element() };
         let Some(node) = folder.children.get(i as usize) else { return div().into_any_element() };
         let share = if folder.size > 0 { node.size as f64 / folder.size as f64 } else { 0. };
-        let mark = match node.kind {
-            DuKind::Dir => icon(Icon::Folder, 14.).text_color(theme.accent).into_any_element(),
-            DuKind::File(kind) => {
+        let mark = match (picture, node.kind) {
+            (Some(picture), _) => image(picture).contain().size(px(ICON)).into_any_element(),
+            (None, DuKind::Dir) => icon(Icon::Folder, 14.).text_color(theme.accent).into_any_element(),
+            (None, DuKind::File(kind)) => {
                 icon(icons::for_kind(kind), 14.).text_color(slot_color(self.legend.slot(node))).into_any_element()
             }
-            DuKind::Rest => {
+            (None, DuKind::Rest) => {
                 icon(icons::for_kind(FileKind::Unknown), 14.).text_color(theme.text.tertiary).into_any_element()
             }
         };
@@ -910,12 +930,14 @@ impl Render for UsageView {
                     crate::settings::set(cx, "usage_developer", &on);
                     this.set_developer(on, cx);
                 },
-            )))
-            .item(
-                icon_button("usage-rescan", Icon::RotateCw)
-                    .tooltip("Measure again")
-                    .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.rescan(cx))),
-            );
+            )));
+        // Where toolbar items share a glass capsule, the rescan button gets its own.
+        let toolbar = if nd::platform::has(nd::platform::Feature::ToolbarTitle) { toolbar.space() } else { toolbar };
+        let toolbar = toolbar.item(
+            icon_button("usage-rescan", Icon::RotateCw)
+                .tooltip("Measure again")
+                .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.rescan(cx))),
+        );
         let content = v_flex()
             .size_full()
             .child(self.crumb_bar(cx))

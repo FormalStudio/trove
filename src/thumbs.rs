@@ -191,24 +191,28 @@ impl Thumbs {
     }
 }
 
-/// The thumbnail of a listed file once it is made, asked for the first time a row or tile
-/// showing it at a picture `long_side` points across is drawn.
-pub fn for_entry(path: Option<PathBuf>, e: &Entry, long_side: f32, cx: &mut App) -> Option<PathBuf> {
+/// The picture of a listed file: its thumbnail once it is made, else the OS's icon for it where
+/// the OS draws one. Both are asked for the first time a row or tile showing the file at a
+/// picture `long_side` points across is drawn.
+pub fn for_entry(path: Option<PathBuf>, e: &Entry, long_side: f32, cx: &mut App) -> Option<ImageSource> {
     let mtime = e.meta.as_ref().and_then(|m| m.modified);
     let size = crate::zoom::thumb_size(long_side);
-    path.and_then(|p| {
-        let network = crate::settings::get(cx).network_thumbnails;
-        let thumbs = get(cx);
-        thumbs.update(cx, |t, _| t.lookup(&p, e.file_kind, mtime, network, size))
-    })
+    let path = path?;
+    let network = crate::settings::get(cx).network_thumbnails;
+    let thumbs = get(cx);
+    let thumb = thumbs.update(cx, |t, _| t.lookup(&path, e.file_kind, mtime, network, size));
+    match thumb {
+        Some(thumb) => Some(ImageSource::path(&thumb)),
+        None => crate::sysicons::icon(&path, e.is_dir(), e.file_kind, long_side, cx),
+    }
 }
 
 /// The picture of a grid tile: the thumbnail once it exists, the kind's icon until then.
 pub fn tile_art(path: Option<PathBuf>, e: &Entry, lit: bool, size: TileSize, cx: &mut Context<Tab>) -> AnyElement {
-    let thumb = for_entry(path, e, size.art.0.max(size.art.1), cx);
+    let picture = for_entry(path, e, size.art.0.max(size.art.1), cx);
     let theme = cx.theme();
-    let art = match thumb {
-        Some(thumb) => image(ImageSource::path(&thumb))
+    let art = match picture {
+        Some(picture) => image(picture)
             .contain()
             .w(px(size.art.0))
             .h(px(size.art.1))
@@ -227,12 +231,11 @@ pub fn tile_art(path: Option<PathBuf>, e: &Entry, lit: bool, size: TileSize, cx:
     div().flex_1().w_full().flex().items_center().justify_center().child(plate).into_any_element()
 }
 
-/// The picture at the head of a list row: the thumbnail in the glyph's box once it exists.
-pub fn row_art(thumb: Option<PathBuf>, glyph: Icon, tint: Hsla, size: RowSize, theme: &Theme) -> AnyElement {
-    let art = match thumb {
-        Some(thumb) => {
-            image(ImageSource::path(&thumb)).contain().size(px(size.art)).rounded(theme.radius.sm).into_any_element()
-        }
+/// The picture at the head of a list row: the thumbnail or the OS's icon in the glyph's box
+/// once it exists.
+pub fn row_art(picture: Option<ImageSource>, glyph: Icon, tint: Hsla, size: RowSize, theme: &Theme) -> AnyElement {
+    let art = match picture {
+        Some(picture) => image(picture).contain().size(px(size.art)).rounded(theme.radius.sm).into_any_element(),
         None => icon(glyph, size.glyph).text_color(tint).into_any_element(),
     };
     div().size(px(size.art)).flex_none().flex().items_center().justify_center().child(art).into_any_element()

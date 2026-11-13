@@ -771,6 +771,11 @@ impl Tab {
             return;
         }
         self.zoom = zoom;
+        self.redraw_rows(cx);
+    }
+
+    /// Redraws every row and tile of every view.
+    pub(crate) fn redraw_rows(&mut self, cx: &mut Context<Self>) {
         self.table.invalidate_all(cx);
         self.grid.invalidate_all(cx);
         self.extras.results.list.invalidate_all(cx);

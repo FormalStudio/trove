@@ -38,6 +38,7 @@ pub struct QuickLook {
     sound: Entity<Sound>,
     video_failed: bool,
     _sound: Subscription,
+    _icons: Option<Subscription>,
 }
 
 impl QuickLook {
@@ -49,7 +50,9 @@ impl QuickLook {
         });
         let sound = sound::get(cx);
         let watch = cx.observe(&sound, |_, _, cx| cx.notify());
+        let icons = crate::sysicons::get(cx).map(|icons| cx.observe(&icons, |_, _, cx| cx.notify()));
         Self {
+            _icons: icons,
             tab: None,
             open: false,
             picked: Vec::new(),
@@ -232,6 +235,7 @@ impl QuickLook {
     }
 
     fn body(&mut self, item: &Item, room: (f32, f32), cx: &mut Context<Self>) -> AnyElement {
+        let system = crate::sysicons::icon(&item.path, item.is_dir, item.kind, 256., cx);
         let theme = cx.theme();
         if item.kind == FileKind::Video && !self.video_failed && self.loaded.info.is_some() {
             let me = cx.weak_entity();
@@ -250,8 +254,8 @@ impl QuickLook {
                 .into_any_element();
         }
         let sound = self.sound.read(cx).state_of(&item.path);
-        let art =
-            preview::art(item, &self.loaded, &self.text, sound, Scale::Large { width: room.0, height: room.1 }, cx);
+        let scale = Scale::Large { width: room.0, height: room.1 };
+        let art = preview::art(item, system, &self.loaded, &self.text, sound, scale, cx);
         match &self.loaded.content {
             Some(Content::Audio { title, artist, album, .. }) => {
                 let title = title.clone().unwrap_or_else(|| item.name.clone());

@@ -15,13 +15,16 @@ pub struct TabExtras {
     /// The last thumbnail arrival this tab bumped its tiles for.
     pub thumbs_seen: u64,
     _thumbs: Subscription,
+    _icons: Option<Subscription>,
 }
 
 impl TabExtras {
     pub fn new(cx: &mut Context<Tab>) -> Self {
         let thumbs = crate::thumbs::get(cx);
         let watch = cx.observe(&thumbs, |tab: &mut Tab, thumbs, cx| crate::thumbs::arrived(tab, &thumbs, cx));
-        Self { results: Results::new(cx), columns: Columns::new(cx), thumbs_seen: 0, _thumbs: watch }
+        let icons =
+            crate::sysicons::get(cx).map(|icons| cx.observe(&icons, |tab: &mut Tab, _, cx| tab.redraw_rows(cx)));
+        Self { results: Results::new(cx), columns: Columns::new(cx), thumbs_seen: 0, _thumbs: watch, _icons: icons }
     }
 }
 

@@ -37,6 +37,7 @@ pub mod settings;
 mod sidebar;
 mod sound;
 mod status;
+mod sysicons;
 mod tab;
 pub mod templates;
 mod theme;

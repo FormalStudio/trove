@@ -332,7 +332,7 @@ pub fn step(tab: &mut Tab, by: isize, cx: &mut Context<Tab>) {
 }
 
 /// A row of any column: picture, name, and a chevron for folders.
-fn row(e: &Entry, thumb: Option<PathBuf>, size: RowSize, theme: &Theme) -> Div {
+fn row(e: &Entry, thumb: Option<ImageSource>, size: RowSize, theme: &Theme) -> Div {
     let symlinked = matches!(e.kind, EntryKind::Symlink { .. }) && e.is_dir();
     let glyph = if symlinked { icons::symlinked_folder() } else { icons::for_kind(e.file_kind) };
     h_flex()

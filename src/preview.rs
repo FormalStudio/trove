@@ -172,6 +172,7 @@ enum Subject {
     Folder {
         title: String,
         items: usize,
+        path: Option<PathBuf>,
     },
     One(Item),
     Many(Vec<PathBuf>),
@@ -242,6 +243,7 @@ pub struct Preview {
     width: f32,
     _watch: Option<Subscription>,
     _sound: Subscription,
+    _icons: Option<Subscription>,
 }
 
 impl Preview {
@@ -253,7 +255,9 @@ impl Preview {
         });
         let sound = sound::get(cx);
         let watch = cx.observe(&sound, |_, _, cx| cx.notify());
+        let icons = crate::sysicons::get(cx).map(|icons| cx.observe(&icons, |_, _, cx| cx.notify()));
         Self {
+            _icons: icons,
             tab: None,
             subject: None,
             loader,
@@ -318,7 +322,11 @@ impl Preview {
             let t = tab.read(cx);
             let mut items = selection(t);
             match items.len() {
-                0 => Subject::Folder { title: t.title(), items: t.visible().len() },
+                0 => Subject::Folder {
+                    title: t.title(),
+                    items: t.visible().len(),
+                    path: t.location().dir().map(PathBuf::from),
+                },
                 1 => Subject::One(items.remove(0)),
                 _ => Subject::Many(items.into_iter().map(|i| i.path).collect()),
             }
@@ -409,14 +417,24 @@ pub fn pane(preview: &Entity<Preview>, visible: bool, cx: &mut App) -> Entity<Pr
 
 impl Render for Preview {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = cx.theme();
         let Some(subject) = self.subject.clone() else { return v_flex().id("preview").size_full() };
+        let picture = match &subject {
+            Subject::Folder { path: Some(path), .. } => {
+                crate::sysicons::icon(path, true, FileKind::Folder, FOLDER_ART, cx)
+            }
+            Subject::One(item) => crate::sysicons::icon(&item.path, item.is_dir, item.kind, FOLDER_ART, cx),
+            _ => None,
+        };
+        let theme = cx.theme();
         let today = Today::now();
         let body = match &subject {
-            Subject::Folder { title, items } => v_flex()
+            Subject::Folder { title, items, .. } => v_flex()
                 .items_center()
                 .gap(theme.spacing.sm)
-                .child(art_box(px(PANE_ART)).child(icon(Icon::Folder, 96.).text_color(theme.accent)))
+                .child(art_box(px(PANE_ART)).child(match picture {
+                    Some(picture) => image(picture).contain().size(px(FOLDER_ART)).into_any_element(),
+                    None => icon(Icon::Folder, 96.).text_color(theme.accent).into_any_element(),
+                }))
                 .child(title_text(title.clone()))
                 .child(quiet(format::items(*items), theme)),
             Subject::Many(paths) => {
@@ -433,7 +451,7 @@ impl Render for Preview {
             }
             Subject::One(item) => {
                 let sound = self.sound.read(cx).state_of(&item.path);
-                let art = art(item, &self.loaded, &self.text, sound, Scale::Pane(self.width), cx);
+                let art = art(item, picture, &self.loaded, &self.text, sound, Scale::Pane(self.width), cx);
                 v_flex()
                     .items_center()
                     .gap(theme.spacing.sm)
@@ -451,6 +469,9 @@ impl Render for Preview {
 
 /// The pane's picture box height.
 pub const PANE_ART: f32 = 190.;
+
+/// How large the OS's icon for a file or folder is drawn in the pane.
+const FOLDER_ART: f32 = 128.;
 
 /// The pane's width until the user drags it.
 pub const PANE_W: f32 = 260.;
@@ -498,6 +519,7 @@ pub fn subtitle(item: &Item, loaded: &Loaded) -> String {
 /// The picture area: the file's own picture, text, listing, cover or icon.
 pub fn art(
     item: &Item,
+    system: Option<ImageSource>,
     loaded: &Loaded,
     text: &Entity<TextView>,
     sound: Option<bool>,
@@ -519,8 +541,16 @@ pub fn art(
             art_box(height).child(child).into_any_element()
         }
     };
-    let glyph = |size: f32| -> AnyElement {
-        icon(icons::for_kind(item.kind), size).text_color(icons::tint(item.kind, theme)).into_any_element()
+    // The OS's own icon for the file where it draws one, else the glyph of its kind.
+    let own = |glyph: Icon, tint: Hsla| -> AnyElement {
+        let size = if large { 160. } else { 96. };
+        match &system {
+            Some(picture) => {
+                let side = if large { 256. } else { FOLDER_ART };
+                image(picture.clone()).contain().size(px(side)).alt(item.name.clone()).into_any_element()
+            }
+            None => icon(glyph, size).text_color(tint).into_any_element(),
+        }
     };
     let picture = |path: &Path, hint: Option<(u32, u32)>| -> AnyElement {
         let mut img = image(ImageSource::path(path)).contain().alt(item.name.clone());
@@ -580,10 +610,8 @@ pub fn art(
                 div().w_full().flex().justify_center().child(column).into_any_element()
             }
         }
-        Some(Content::Folder { .. }) => {
-            boxed(icon(Icon::Folder, if large { 160. } else { 96. }).text_color(theme.accent).into_any_element())
-        }
-        _ => boxed(glyph(if large { 160. } else { 96. })),
+        Some(Content::Folder { .. }) => boxed(own(Icon::Folder, theme.accent)),
+        _ => boxed(own(icons::for_kind(item.kind), icons::tint(item.kind, theme))),
     }
 }
 
