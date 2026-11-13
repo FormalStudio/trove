@@ -2,11 +2,13 @@
 //! watching, volumes and places. No UI types.
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
+pub mod du;
 pub mod entry;
 pub mod listing;
 pub mod places;
 pub mod volumes;
 
+pub use du::{DuEvent, Node as DuNode, NodeKind as DuKind, Progress as DuProgress, scan as du_scan};
 pub use entry::{
     Entry, EntryId, EntryKind, FileKind, IdMap, IdSet, Meta, SortKey, SortOrder, natural_cmp, natural_key, sort_entries,
 };

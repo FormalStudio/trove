@@ -829,6 +829,19 @@ fn menu_rows(menu: ContextMenu) -> Vec<(String, bool, bool)> {
 }
 
 #[test]
+fn a_network_mount_shows_its_free_space_like_a_disk() {
+    let h = Harness::new();
+    let sidebar = h.root().read(&h.cx).sidebar().clone();
+    let sidebar = sidebar.read(&h.cx);
+    let free = |kind| {
+        let volume = sidebar.volumes().iter().find(|v| v.kind == kind).expect("volume");
+        sidebar.free_of(&volume.mount_point)
+    };
+    assert_eq!(free(trove_fs::VolumeKind::Network), Some(1_310_000_000_000));
+    assert_eq!(free(trove_fs::VolumeKind::Removable), Some(612_000_000_000));
+}
+
+#[test]
 fn the_app_menu_holds_the_window_commands() {
     let mut h = Harness::new();
     let window = h.window.id();
@@ -849,6 +862,7 @@ fn the_app_menu_holds_the_window_commands() {
             row("New tab"),
             ("Reopen closed tab".to_owned(), false, false),
             ("Show hidden files".to_owned(), true, hidden),
+            row("Disk usage"),
             row("Preferences"),
             row("Keyboard shortcuts"),
             row("About Trove"),

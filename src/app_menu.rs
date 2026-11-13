@@ -31,6 +31,7 @@ pub fn items(menu: ContextMenu, show_hidden: bool, can_reopen: bool) -> ContextM
         .entry(MenuItem::action("Reopen closed tab", ReopenClosedTab).enabled(can_reopen))
         .separator()
         .entry(MenuItem::action("Show hidden files", ToggleHidden).checked(show_hidden))
+        .item("Disk usage", DiskUsage)
         .separator()
         .item("Preferences", Preferences)
         .item("Keyboard shortcuts", KeyboardShortcuts)
@@ -65,7 +66,10 @@ pub fn set_menu_bar(cx: &mut App) {
                 MenuItem::action("New tab", NewTab),
                 MenuItem::action("Reopen closed tab", ReopenClosedTab),
             ]),
-            Menu::new("View").items([MenuItem::action("Show hidden files", ToggleHidden)]),
+            Menu::new("View").items([
+                MenuItem::action("Show hidden files", ToggleHidden),
+                MenuItem::action("Disk usage", DiskUsage),
+            ]),
             Menu::help([MenuItem::action("Keyboard shortcuts", KeyboardShortcuts)]),
         ],
     );

@@ -56,6 +56,7 @@ actions!(
         OpenTerminal,
         Properties,
         BatchRename,
+        DiskUsage,
     ]
 );
 
@@ -101,6 +102,12 @@ pub struct RemoveBookmark(pub PathBuf);
 #[derive(Clone, PartialEq, Debug, Action)]
 #[action(namespace = trove, no_json)]
 pub struct Eject(pub PathBuf);
+
+/// The Disk Usage window on a sidebar place or volume. [`DiskUsage`] is the same on the folder
+/// selected, else the folder shown.
+#[derive(Clone, PartialEq, Debug, Action)]
+#[action(namespace = trove, no_json)]
+pub struct DiskUsageOf(pub PathBuf);
 
 /// Files were dropped on a folder: dragged from a listing (the whole selection), or in from
 /// another app.
@@ -185,6 +192,7 @@ pub fn bind(cx: &mut App) {
         KeyBinding::new("secondary-i", TogglePreview, w),
         KeyBinding::new("secondary-l", EditPath, w),
         KeyBinding::new("secondary-f", FocusSearch, w),
+        KeyBinding::new("secondary-u", DiskUsage, w),
         KeyBinding::new("secondary-t", NewTab, w),
         KeyBinding::new("secondary-w", CloseTab, w),
         KeyBinding::new("ctrl-tab", NextTab, w),

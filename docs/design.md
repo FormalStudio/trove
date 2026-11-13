@@ -376,6 +376,7 @@ index is over 5 minutes old a query also walks its scope 3 levels deep to catch 
 | Ctrl+Shift+N | new folder, named inline |
 | Ctrl+D | duplicate |
 | Ctrl+F | search; Escape clears and returns to the folder |
+| Ctrl+U | Disk Usage of the selected folder, else the folder shown |
 | Down, in the search field | into the results |
 | Ctrl+Enter, Alt+Enter, on a result | show in its enclosing folder, selected |
 | Ctrl+L | edit the path |

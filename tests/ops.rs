@@ -357,14 +357,14 @@ fn each_sidebar_row_has_its_own_menu_and_a_middle_click_opens_a_tab() {
     let mut h = Harness::new(&["a.txt", "b/"]);
     let documents = h.home.join("Documents");
     let id = format!("place:{}", documents.display());
-    assert_eq!(h.menu_on_place(&id), ["Open in new tab", "-", "Add to bookmarks"]);
+    assert_eq!(h.menu_on_place(&id), ["Open in new tab", "Disk usage", "-", "Add to bookmarks"]);
     assert_eq!(h.menu_on_place("trash"), ["Open in new tab", "-", "Empty Trash"]);
     assert_eq!(h.menu_on_place("recent"), ["Open in new tab"]);
     assert_eq!(h.tab().read(&h.cx).location(), &Location::Dir(h.work()), "a right click opens no place");
 
     h.act(BookmarkPlace(documents.clone()));
     let bookmark = h.menu_on_place(&id);
-    assert_eq!(bookmark, ["Open in new tab", "-", "Remove from bookmarks"], "{bookmark:?}");
+    assert_eq!(bookmark, ["Open in new tab", "Disk usage", "-", "Remove from bookmarks"], "{bookmark:?}");
 
     let places = h.node("places");
     h.cx.emit(places, nd::components::SourceMiddleClicked { id: id.into() });
@@ -387,6 +387,7 @@ fn the_empty_space_menu_offers_new_items_and_view_options() {
         "Paste",
         "-",
         "Open in terminal",
+        "Disk usage",
         "-",
         "Show hidden files",
         "Sort by >",

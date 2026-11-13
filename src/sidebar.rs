@@ -1,6 +1,6 @@
 //! The sidebar: Favourites, Bookmarks, Devices and Network as one source list. Volumes follow
-//! `watch_volumes`; a device's usage bar fills in when statvfs answers, and a network mount is
-//! never touched until it is opened. Files dropped on a place go into it, and a folder dropped
+//! `watch_volumes`; a volume's usage bar fills in when statvfs answers, asked off the main
+//! thread and given up on after two seconds, so a dead share costs the window nothing. Files dropped on a place go into it, and a folder dropped
 //! between the bookmarks becomes one.
 
 use std::collections::HashMap;
@@ -65,6 +65,11 @@ impl Sidebar {
         &self.volumes
     }
 
+    /// The bytes free on the volume mounted at `mount`, once its file system has answered.
+    pub fn free_of(&self, mount: &std::path::Path) -> Option<u64> {
+        self.usage.get(mount).map(|u| u.free)
+    }
+
     /// Highlights the row for the active tab's location, if it has one.
     pub fn set_current(&mut self, location: &Location, cx: &mut Context<Self>) {
         if self.current.as_ref() != Some(location) {
@@ -76,7 +81,7 @@ impl Sidebar {
     fn set_volumes(&mut self, volumes: Vec<Volume>, cx: &mut Context<Self>) {
         let unknown: Vec<PathBuf> = volumes
             .iter()
-            .filter(|v| is_device(v.kind) && !self.usage.contains_key(&v.mount_point))
+            .filter(|v| !self.usage.contains_key(&v.mount_point))
             .map(|v| v.mount_point.clone())
             .collect();
         for mount in unknown {

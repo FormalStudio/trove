@@ -149,6 +149,15 @@ pub fn register(root: Scaffold, cx: &mut Context<Root>) -> Scaffold {
                 crate::properties::open(cx, r.window_id(), paths);
             }
         }))
+        .on_action(cx.listener(|r, _: &DiskUsage, _, cx| {
+            let dir = r.active_tab().read(cx).selected_folder().or_else(|| here(r, cx));
+            if let Some(dir) = dir {
+                crate::usage::open(cx, dir);
+            }
+        }))
+        .on_action(cx.listener(|_, DiskUsageOf(dir): &DiskUsageOf, _, cx| {
+            crate::usage::open(cx, dir.clone());
+        }))
         .on_action(cx.listener(|r, _: &BatchRename, _, cx| {
             let paths = selection(r, cx);
             if !paths.is_empty() && !in_trash(r, cx) {

@@ -64,7 +64,7 @@ pub fn files(menu: ContextMenu, t: &Target, cx: &mut App) -> ContextMenu {
     }
     menu = menu.item("Copy path", CopyPath);
     if one_folder {
-        menu = menu.item("Add to bookmarks", AddBookmark);
+        menu = menu.item("Add to bookmarks", AddBookmark).item("Disk usage", DiskUsage);
     }
     menu.separator().item_destructive("Move to Trash", Trash).separator().item("Properties\u{2026}", Properties)
 }
@@ -118,6 +118,7 @@ pub fn folder(menu: ContextMenu, h: &Here, templates: Option<&[Node]>) -> Contex
             .item("Paste", Paste)
             .separator()
             .item("Open in terminal", OpenTerminal)
+            .item("Disk usage", DiskUsage)
             .separator();
     }
     let key = |label: &'static str, k: SortKey| MenuItem::action(label, SortBy(k)).checked(h.sort.key == k);
@@ -208,7 +209,10 @@ pub enum Place {
 pub fn sidebar(menu: ContextMenu, place: &Place) -> ContextMenu {
     match place {
         Place::Folder { path, bookmark } => {
-            let menu = menu.item("Open in new tab", OpenPlaceInNewTab(Location::Dir(path.clone()))).separator();
+            let menu = menu
+                .item("Open in new tab", OpenPlaceInNewTab(Location::Dir(path.clone())))
+                .item("Disk usage", DiskUsageOf(path.clone()))
+                .separator();
             if *bookmark {
                 menu.item("Remove from bookmarks", RemoveBookmark(path.clone()))
             } else {
@@ -216,7 +220,9 @@ pub fn sidebar(menu: ContextMenu, place: &Place) -> ContextMenu {
             }
         }
         Place::Volume { mount, ejectable } => {
-            let menu = menu.item("Open in new tab", OpenPlaceInNewTab(Location::Dir(mount.clone())));
+            let menu = menu
+                .item("Open in new tab", OpenPlaceInNewTab(Location::Dir(mount.clone())))
+                .item("Disk usage", DiskUsageOf(mount.clone()));
             if *ejectable { menu.separator().item("Eject", Eject(mount.clone())) } else { menu }
         }
         Place::Trash => menu

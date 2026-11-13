@@ -38,10 +38,15 @@ minute, focused or behind another window.
   `ext:pdf`, `kind:image`, `size:>10mb`, `modified:week`, `in:projects`, `"exact phrase"`,
   `*.rs` globs. Ranked results update per keystroke from a background index of Home.
 - A preview pane (Ctrl+I) for pictures, text, folders, archives and audio, and Quick Look on Space.
-- A sidebar of places, bookmarks and devices with their free space, each row with its own menu.
+- A sidebar of places, bookmarks, devices and network mounts with their free space, each row
+  with its own menu.
   The sidebar and the preview pane resize, and keep their widths.
-- Network mounts are never touched until clicked. A folder that is slow to answer says "Waiting
-  for server" after one second and the window stays responsive.
+- Disk Usage (Ctrl+U, or a folder's or volume's menu): a folder's items largest first beside a
+  treemap coloured by the extensions that hold the most space. Double-click a folder to go into
+  it, and move what you find to the Trash from there. `trove --usage <folder>` opens it alone.
+- A network mount's folders are never read until clicked; only its free space is asked for,
+  off the window thread. A folder that is slow to answer says "Waiting for server" after one
+  second and the window stays responsive.
 - Copy, move, rename, trash, restore, compress and extract run as queued jobs with progress,
   conflict handling and undo. Hold Ctrl while dragging to copy, Shift to move.
 - Interop with the rest of the desktop: the freedesktop Trash, the shared thumbnail cache, GTK

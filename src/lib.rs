@@ -34,9 +34,12 @@ mod sound;
 mod status;
 mod tab;
 pub mod templates;
+mod theme;
 mod thumbs;
 mod trace;
 mod trash;
+mod treemap;
+pub mod usage;
 pub mod zoom;
 
 use std::path::PathBuf;
@@ -47,6 +50,7 @@ use nd::prelude::*;
 pub use location::Location;
 pub use root::{Place, Root, Start};
 pub use tab::{Load, RENAME_FIELD, Rename, Tab, View, row_id, stem_chars};
+pub use theme::map_colors;
 pub use trash::TrashInfo;
 
 pub use columns::Columns;
@@ -271,7 +275,8 @@ pub fn items_by_folder(items: Vec<PathBuf>) -> Vec<Place> {
     places
 }
 
-/// Where a launch starts, and the items to open the Properties sheet on over it: `trove
+/// Where a launch starts, and the items to open the Properties sheet on over it (`trove
+/// --usage <folder>` never gets here: it opens the Disk Usage window alone): `trove
 /// --select <item>...` shows items in their folders, `trove --properties <item>...` too with
 /// the sheet over them, `trove <path>...` opens a tab on each, nothing reopens the last session.
 pub fn start_from(args: Vec<std::ffi::OsString>) -> (Start, Vec<PathBuf>) {
@@ -306,6 +311,15 @@ pub fn run() -> nd::Result<()> {
                 std::process::exit(1);
             }
             return Ok(());
+        }
+        Some("--usage") => {
+            trace::init();
+            pump::set_live();
+            let root = std::env::args_os().nth(2).map_or_else(|| env::get().home.clone(), arg_path);
+            let root = std::path::absolute(&root).unwrap_or(root);
+            return app().run(move |cx| {
+                usage::open(cx, root.clone());
+            });
         }
         Some("--file-manager") => {
             trace::init();

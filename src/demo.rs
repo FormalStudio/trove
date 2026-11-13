@@ -109,7 +109,7 @@ type VolumeRow = (&'static str, &'static str, &'static str, VolumeKind, Option<(
 const VOLUMES: &[VolumeRow] = &[
     ("System", "", "ext4", VolumeKind::Root, Some((512_000_000_000, 187_400_000_000))),
     ("Backup", "Backup", "exfat", VolumeKind::Removable, Some((1_000_000_000_000, 612_000_000_000))),
-    ("NAS", "Studio NAS", "nfs4", VolumeKind::Network, None),
+    ("NAS", "Studio NAS", "nfs4", VolumeKind::Network, Some((4_000_000_000_000, 1_310_000_000_000))),
 ];
 
 /// What each volume holds, so opening one shows a folder.

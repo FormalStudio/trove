@@ -11,5 +11,7 @@ fn main() {
         .window("batch-rename", trove::batch_rename::open_demo)
         .window("preferences", trove::open_preferences_demo)
         .window("shortcuts", trove::open_shortcuts_demo)
+        .window("usage", trove::usage::open_demo)
+        .allow(trove::map_colors())
         .run()
 }
