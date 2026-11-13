@@ -10,5 +10,5 @@ dev(
     packages = [pkg("rustup", links = {name: "rustup" for name in RUST})],
     libs = [lib(n) for n in LIBS] if platform.is_linux else [],
     bins = [bin(n) for n in ["pkg-config", "gcc", "grim", "wl-copy"]] if platform.is_linux else [],
-    env = {"RUSTUP_TOOLCHAIN": "1.95.0"},
+    env = {"RUSTUP_TOOLCHAIN": "1.98.1"},
 )
