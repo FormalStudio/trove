@@ -1,5 +1,6 @@
 use std::fs;
 use std::io::Cursor;
+#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::time::{Duration, Instant};
 
@@ -62,8 +63,11 @@ fn generates_png_with_spec_keys_and_private_modes() {
     assert_eq!(meta.uri.as_deref(), Some(uri::file_uri(&src).as_str()));
     assert_eq!(meta.mtime, Some(secs(mtime_of(&src))));
     assert_eq!(meta.size, Some(fs::metadata(&src).unwrap().len()));
-    assert_eq!(fs::metadata(&t).unwrap().permissions().mode() & 0o777, 0o600);
-    assert_eq!(fs::metadata(t.parent().unwrap()).unwrap().permissions().mode() & 0o777, 0o700);
+    #[cfg(unix)]
+    {
+        assert_eq!(fs::metadata(&t).unwrap().permissions().mode() & 0o777, 0o600);
+        assert_eq!(fs::metadata(t.parent().unwrap()).unwrap().permissions().mode() & 0o777, 0o700);
+    }
     let n = r.engine.thumbnail(&src, mtime_of(&src), ThumbSize::Normal).unwrap();
     assert_eq!(decode_dims(&n), (128, 85));
 }
@@ -120,6 +124,7 @@ fn exif_orientation_is_applied_on_both_decode_paths() {
     assert_eq!((generic.width, generic.height), (128, 256));
 }
 
+#[cfg(unix)]
 #[test]
 fn cache_hit_is_valid_only_while_mtime_matches() {
     let r = rig();
@@ -201,6 +206,7 @@ fn skips_the_cache_itself_and_oversized_images() {
 }
 
 /// A thumbnailer that logs each input, takes `delay` seconds, and writes a fixture PNG (or fails).
+#[cfg(unix)]
 fn install_thumbnailer(r: &Rig, delay: &str, body: &str) -> PathBuf {
     let tdir = r.engine.config.thumbnailer_dirs[0].clone();
     fs::create_dir_all(&tdir).unwrap();
@@ -218,16 +224,19 @@ fn install_thumbnailer(r: &Rig, delay: &str, body: &str) -> PathBuf {
     log
 }
 
+#[cfg(unix)]
 fn copy_body(r: &Rig) -> String {
     format!("cp {} \"$2\"", r.engine.config.thumbnailer_dirs[0].join("fixture.png").display())
 }
 
+#[cfg(unix)]
 fn fake_video(r: &Rig, name: &str) -> PathBuf {
     let p = r.dir.join(name);
     fs::write(&p, b"not really a video").unwrap();
     p
 }
 
+#[cfg(unix)]
 #[test]
 fn system_thumbnailer_output_gets_the_spec_keys() {
     let r = rig();
@@ -246,6 +255,7 @@ fn system_thumbnailer_output_gets_the_spec_keys() {
     assert_eq!(fs::read_to_string(&log).unwrap().lines().count(), 1);
 }
 
+#[cfg(unix)]
 #[test]
 fn a_failing_thumbnailer_leaves_a_fail_record_and_no_retry() {
     let r = rig();
@@ -259,6 +269,7 @@ fn a_failing_thumbnailer_leaves_a_fail_record_and_no_retry() {
     assert_eq!(pngmeta::read_meta(&fail).unwrap().mtime, Some(secs(mtime)));
 }
 
+#[cfg(unix)]
 #[test]
 fn a_hung_thumbnailer_is_killed() {
     let r = rig();
@@ -272,6 +283,7 @@ fn a_hung_thumbnailer_is_killed() {
     assert!(started.elapsed() < Duration::from_secs(5));
 }
 
+#[cfg(unix)]
 #[test]
 fn no_thumbnailer_for_the_mime_is_none_without_a_record() {
     let r = rig();
@@ -281,6 +293,7 @@ fn no_thumbnailer_for_the_mime_is_none_without_a_record() {
     assert!(!r.engine.config.thumbnails_dir.join("fail").exists());
 }
 
+#[cfg(unix)]
 fn wait_for_lines(log: &Path, n: usize) {
     let deadline = Instant::now() + Duration::from_secs(10);
     while fs::read_to_string(log).map_or(0, |s| s.lines().count()) < n {
@@ -289,6 +302,7 @@ fn wait_for_lines(log: &Path, n: usize) {
     }
 }
 
+#[cfg(unix)]
 fn names(rx: &flume::Receiver<Made>, n: usize) -> Vec<String> {
     (0..n)
         .map(|_| {
@@ -299,6 +313,7 @@ fn names(rx: &flume::Receiver<Made>, n: usize) -> Vec<String> {
         .collect()
 }
 
+#[cfg(unix)]
 #[test]
 fn queue_is_lifo_deduped_and_bumps_a_repeat_to_the_front() {
     let r = rig();
@@ -319,6 +334,7 @@ fn queue_is_lifo_deduped_and_bumps_a_repeat_to_the_front() {
     assert_eq!(fs::read_to_string(&log).unwrap().lines().count(), 4);
 }
 
+#[cfg(unix)]
 #[test]
 fn request_for_a_running_path_answers_once() {
     let r = rig();
@@ -333,6 +349,7 @@ fn request_for_a_running_path_answers_once() {
     assert!(rx.recv_timeout(Duration::from_millis(600)).is_err());
 }
 
+#[cfg(unix)]
 #[test]
 fn cancel_all_drops_what_has_not_started() {
     let r = rig();
@@ -361,9 +378,11 @@ fn pool_answers_none_for_a_file_that_cannot_be_thumbnailed() {
     assert_eq!(rx.recv_timeout(Duration::from_secs(5)).unwrap(), (missing, ThumbSize::Normal, None));
 }
 
+#[cfg(unix)]
 trait InoForTest {
     fn ino_for_test(&self) -> u64;
 }
+#[cfg(unix)]
 impl InoForTest for fs::Metadata {
     fn ino_for_test(&self) -> u64 {
         std::os::unix::fs::MetadataExt::ino(self)

@@ -1,7 +1,5 @@
 use std::collections::HashSet;
 use std::io;
-use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::Relaxed};
 use std::sync::{Arc, Mutex};
@@ -43,7 +41,7 @@ impl Prune {
         if e.depth() == 0 {
             return true;
         }
-        let name = e.file_name().as_bytes();
+        let name = e.file_name().as_encoded_bytes();
         if !self.allow_hidden && is_hidden_name(name) {
             return false;
         }
@@ -70,9 +68,18 @@ pub(crate) fn walker(root: &Path, prune: Prune, max_depth: Option<usize>) -> ign
         .build_parallel()
 }
 
-/// Nice 19 and the idle I/O class for the calling thread. Both are per thread on Linux and
-/// inherited by threads it spawns, which is how the walker's pool gets them too.
+/// Nice 19 and the idle I/O class for the calling thread on Linux, background mode on Windows.
+/// Both are inherited by threads it spawns, which is how the walker's pool gets them too. macOS
+/// has no per-thread setting that does not starve the walk, so it runs at normal priority.
 pub(crate) fn lower_priority() {
+    #[cfg(target_os = "windows")]
+    // SAFETY: SetThreadPriority on the calling thread's pseudo handle.
+    unsafe {
+        use windows_sys::Win32::System::Threading::{
+            GetCurrentThread, SetThreadPriority, THREAD_MODE_BACKGROUND_BEGIN,
+        };
+        SetThreadPriority(GetCurrentThread(), THREAD_MODE_BACKGROUND_BEGIN);
+    }
     #[cfg(target_os = "linux")]
     // SAFETY: plain syscalls on the calling thread with integer arguments.
     unsafe {
@@ -85,8 +92,16 @@ pub(crate) fn lower_priority() {
     }
 }
 
+#[cfg(unix)]
 pub(crate) fn mtime_of(md: &std::fs::Metadata) -> u32 {
+    use std::os::unix::fs::MetadataExt;
     u32::try_from(md.mtime().max(0)).unwrap_or(u32::MAX)
+}
+
+#[cfg(not(unix))]
+pub(crate) fn mtime_of(md: &std::fs::Metadata) -> u32 {
+    let secs = md.modified().ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map_or(0, |d| d.as_secs());
+    u32::try_from(secs).unwrap_or(u32::MAX)
 }
 
 /// Walks `root` for the index. Fails when the root itself is on a network or pseudo file
@@ -153,10 +168,11 @@ impl Drop for Visitor<'_> {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use std::fs;
+    use std::os::unix::fs::symlink;
 
     #[cfg(target_os = "linux")]
     #[test]
@@ -190,8 +206,8 @@ mod tests {
         {
             fs::write(root.join(f), b"x").unwrap();
         }
-        std::os::unix::fs::symlink("..", root.join("a/b/loop")).unwrap();
-        std::os::unix::fs::symlink(root, root.join("a/self")).unwrap();
+        symlink("..", root.join("a/b/loop")).unwrap();
+        symlink(root, root.join("a/self")).unwrap();
         let ix = build_index(root, &AtomicU64::new(0), &AtomicBool::new(false)).unwrap();
         let mut paths: Vec<String> = (1..ix.len() as u32)
             .map(|i| ix.path_of(i).strip_prefix(root).unwrap().to_string_lossy().into_owned())

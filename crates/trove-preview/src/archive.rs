@@ -152,12 +152,21 @@ fn run_lister(tool: PathBuf, path: &Path) -> Option<Listing> {
 
 pub(crate) fn which(tool: &str) -> Option<PathBuf> {
     let path = std::env::var_os("PATH")?;
+    #[cfg(windows)]
+    let tool = &format!("{tool}.exe");
     std::env::split_paths(&path).map(|d| d.join(tool)).find(|p| is_executable(p))
 }
 
+#[cfg(unix)]
 pub(crate) fn is_executable(p: &Path) -> bool {
     use std::os::unix::fs::PermissionsExt;
     std::fs::metadata(p).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+}
+
+/// Windows has no execute bit; a file on `PATH` with an `.exe` name is what `which` looks for.
+#[cfg(not(unix))]
+pub(crate) fn is_executable(p: &Path) -> bool {
+    std::fs::metadata(p).is_ok_and(|m| m.is_file())
 }
 
 #[cfg(test)]

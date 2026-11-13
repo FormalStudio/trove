@@ -1,6 +1,5 @@
 use std::collections::HashMap;
 use std::ffi::OsStr;
-use std::os::unix::ffi::OsStrExt;
 use std::path::{Component, Path, PathBuf};
 use std::time::Duration;
 
@@ -78,7 +77,11 @@ impl Index {
     pub fn from_raw(root: PathBuf, raw: Vec<RawEntry>, built_at: u64) -> Index {
         let n = raw.len() + 1;
         let name_of = |node: u32| -> &[u8] {
-            if node == 0 { b"" } else { raw[node as usize - 1].path.file_name().map_or(&b""[..], OsStr::as_bytes) }
+            if node == 0 {
+                b""
+            } else {
+                raw[node as usize - 1].path.file_name().map_or(&b""[..], OsStr::as_encoded_bytes)
+            }
         };
 
         let mut dirs: HashMap<&Path, u32> = HashMap::with_capacity(raw.len() / 8 + 1);
@@ -208,7 +211,7 @@ impl Index {
         let mut cur = 0;
         for comp in rel.components() {
             match comp {
-                Component::Normal(name) => cur = self.child(cur, name.as_bytes())?,
+                Component::Normal(name) => cur = self.child(cur, name.as_encoded_bytes())?,
                 Component::CurDir => {}
                 _ => return None,
             }
@@ -225,7 +228,7 @@ impl Index {
         }
         let mut p = self.root.clone();
         for &k in chain.iter().rev() {
-            p.push(OsStr::from_bytes(self.name(k)));
+            p.push(crate::os::os_str(self.name(k)));
         }
         p
     }

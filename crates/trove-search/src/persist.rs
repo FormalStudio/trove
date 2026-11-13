@@ -1,6 +1,5 @@
 use std::fs;
 use std::io;
-use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 
 use crate::index::{DIR, Index, NONE};
@@ -18,7 +17,7 @@ pub(crate) fn file_name() -> String {
 /// record array whole, then the names blob, then a checksum of everything before it.
 pub(crate) fn save(ix: &Index, path: &Path) -> io::Result<()> {
     let n = ix.len();
-    let root = ix.root.as_os_str().as_bytes();
+    let root = ix.root.as_os_str().as_encoded_bytes();
     let mut b = Vec::with_capacity(64 + root.len() + n * 26 + ix.names.len());
     b.extend_from_slice(MAGIC);
     b.extend_from_slice(&VERSION.to_le_bytes());
@@ -72,7 +71,7 @@ pub(crate) fn load(path: &Path, root: &Path) -> io::Result<Index> {
     let n = r.u32()? as usize;
     let names_len = r.u32()? as usize;
     let root_len = r.u32()? as usize;
-    if r.take(root_len)? != root.as_os_str().as_bytes() {
+    if r.take(root_len)? != root.as_os_str().as_encoded_bytes() {
         return Err(bad("root"));
     }
     let off = r.u32s(n.checked_add(1).ok_or_else(|| bad("count"))?)?;

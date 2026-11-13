@@ -140,8 +140,11 @@ fn push_text(out: &mut Vec<u8>, key: &str, value: &str) {
 
 pub(crate) fn write_private(path: &Path, bytes: &[u8]) -> io::Result<()> {
     use std::io::Write;
-    use std::os::unix::fs::OpenOptionsExt;
-    let mut f = std::fs::OpenOptions::new().write(true).create(true).truncate(true).mode(0o600).open(path)?;
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    let mut f = options.open(path)?;
     f.write_all(bytes)
 }
 

@@ -129,7 +129,7 @@ impl<'a> Scan<'a> {
             base_depth: ix.depth[scope as usize],
         };
         let scope_name = if scope == 0 {
-            crate::text::fold(ix.root.file_name().map_or(&b""[..], std::os::unix::ffi::OsStrExt::as_bytes))
+            crate::text::fold(ix.root.file_name().map_or(&b""[..], std::ffi::OsStr::as_encoded_bytes))
         } else {
             ix.lower_name(scope).to_vec()
         };

@@ -7,7 +7,6 @@ mod uri;
 
 use std::collections::HashSet;
 use std::fs;
-use std::os::unix::fs::DirBuilderExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
@@ -146,9 +145,8 @@ fn external(
         let _ = fs::remove_file(&tmp);
         return None;
     };
-    let placed = pngmeta::write_private(&tmp, &bytes)
-        .and_then(|()| fs::set_permissions(&tmp, std::os::unix::fs::PermissionsExt::from_mode(0o600)))
-        .and_then(|()| fs::rename(&tmp, target));
+    let placed =
+        pngmeta::write_private(&tmp, &bytes).and_then(|()| restrict_file(&tmp)).and_then(|()| fs::rename(&tmp, target));
     if placed.is_err() {
         let _ = fs::remove_file(&tmp);
         return None;
@@ -156,8 +154,22 @@ fn external(
     Some(target.to_path_buf())
 }
 
+#[cfg(unix)]
+fn restrict_file(path: &Path) -> std::io::Result<()> {
+    fs::set_permissions(path, std::os::unix::fs::PermissionsExt::from_mode(0o600))
+}
+
+#[cfg(not(unix))]
+fn restrict_file(_: &Path) -> std::io::Result<()> {
+    Ok(())
+}
+
 fn make_dir(dir: &Path) -> std::io::Result<()> {
-    fs::DirBuilder::new().recursive(true).mode(0o700).create(dir)
+    let mut builder = fs::DirBuilder::new();
+    builder.recursive(true);
+    #[cfg(unix)]
+    std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
+    builder.create(dir)
 }
 
 fn temp_name(dir: &Path) -> PathBuf {
