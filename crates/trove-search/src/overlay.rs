@@ -1,4 +1,3 @@
-use std::os::unix::ffi::OsStrExt;
 use std::path::{Component, Path, PathBuf};
 
 use crate::index::Index;
@@ -92,7 +91,7 @@ impl Overlay {
             let Ok(rel) = e.path.strip_prefix(from) else { continue };
             if rel.as_os_str().is_empty() {
                 e.path = to.to_path_buf();
-                e.lower = fold(to.file_name().map_or(&b""[..], |n| n.as_bytes()));
+                e.lower = fold(to.file_name().map_or(&b""[..], |n| n.as_encoded_bytes()));
             } else {
                 e.path = to.join(rel);
             }
@@ -116,7 +115,7 @@ impl Overlay {
                     _ => to.to_path_buf(),
                 };
                 let lower = if r == i {
-                    fold(to.file_name().map_or(&b""[..], |n| n.as_bytes()))
+                    fold(to.file_name().map_or(&b""[..], |n| n.as_encoded_bytes()))
                 } else {
                     ix.lower_name(r).to_vec()
                 };
@@ -163,7 +162,7 @@ impl Overlay {
             let comps: Vec<&[u8]> = rel
                 .components()
                 .filter_map(|c| match c {
-                    Component::Normal(n) => Some(n.as_bytes()),
+                    Component::Normal(n) => Some(n.as_encoded_bytes()),
                     _ => None,
                 })
                 .collect();
@@ -189,7 +188,7 @@ impl Overlay {
 
 fn stat_extra(p: &Path) -> Option<Extra> {
     let md = std::fs::symlink_metadata(p).ok()?;
-    let name = p.file_name()?.as_bytes();
+    let name = p.file_name()?.as_encoded_bytes();
     let is_dir = md.is_dir();
     Some(Extra {
         path: p.to_path_buf(),
@@ -214,7 +213,7 @@ fn walk_extras(dir: &Path, out: &mut Vec<Extra>) -> bool {
             }
             let p = e.path();
             let Some(x) = stat_extra(&p) else { continue };
-            if x.is_dir && !excluded(&p, p.file_name().map_or(&b""[..], |n| n.as_bytes())) {
+            if x.is_dir && !excluded(&p, p.file_name().map_or(&b""[..], |n| n.as_encoded_bytes())) {
                 stack.push(p);
             }
             out.push(x);

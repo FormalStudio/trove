@@ -3,7 +3,6 @@ use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 use std::ffi::OsStr;
 use std::hash::{BuildHasher, BuildHasherDefault, Hasher, RandomState};
-use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock};
 use std::time::SystemTime;
@@ -18,7 +17,7 @@ static ID_KEY: LazyLock<RandomState> = LazyLock::new(RandomState::new);
 
 impl EntryId {
     pub fn of(name: impl AsRef<OsStr>) -> Self {
-        Self(ID_KEY.hash_one(name.as_ref().as_bytes()))
+        Self(ID_KEY.hash_one(name.as_ref().as_encoded_bytes()))
     }
 }
 

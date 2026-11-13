@@ -10,6 +10,8 @@ mod demo;
 pub mod du_cli;
 mod env;
 mod extras;
+// nd-allow(cfg-target-os): FileManager1 is a D-Bus service, and only Linux desktops have the bus.
+#[cfg(target_os = "linux")]
 pub mod file_manager;
 mod fileops;
 mod format;
@@ -20,6 +22,8 @@ pub mod menus;
 pub mod ops;
 mod pathbar;
 pub mod picker;
+// nd-allow(cfg-target-os): the FileChooser portal backend exists only under xdg-desktop-portal.
+#[cfg(target_os = "linux")]
 pub mod portal;
 mod preview;
 pub mod properties;
@@ -230,8 +234,7 @@ fn demo_start(start: Start) -> Start {
 
 /// A launcher passes `%U` as `file://` URIs; a shell passes plain paths.
 fn arg_path(arg: std::ffi::OsString) -> PathBuf {
-    use std::os::unix::ffi::{OsStrExt, OsStringExt};
-    let Some(rest) = arg.as_bytes().strip_prefix(b"file://") else { return PathBuf::from(arg) };
+    let Some(rest) = arg.as_encoded_bytes().strip_prefix(b"file://") else { return PathBuf::from(arg) };
     let rest = rest.strip_prefix(b"localhost").unwrap_or(rest);
     let hex = |b: u8| (b as char).to_digit(16).map(|d| d as u8);
     let mut out = Vec::with_capacity(rest.len());
@@ -248,7 +251,7 @@ fn arg_path(arg: std::ffi::OsString) -> PathBuf {
             }
         }
     }
-    PathBuf::from(std::ffi::OsString::from_vec(out))
+    PathBuf::from(trove_fs::os::os_string_from_bytes(out))
 }
 
 /// "Show in folder" for `items`: a tab for each folder they are in, in the order the first of
@@ -306,6 +309,8 @@ pub(crate) fn start_for(items: bool, paths: Vec<PathBuf>) -> Start {
 pub fn run() -> nd::Result<()> {
     match std::env::args_os().nth(1).as_deref().and_then(|a| a.to_str()) {
         Some("--pick") => return run_picker(),
+        // nd-allow(cfg-target-os): see the portal module.
+        #[cfg(target_os = "linux")]
         Some("--portal") => {
             if let Err(e) = portal::run() {
                 eprintln!("trove: portal: {e}");
@@ -329,6 +334,8 @@ pub fn run() -> nd::Result<()> {
                 }
             });
         }
+        // nd-allow(cfg-target-os): see the file_manager module.
+        #[cfg(target_os = "linux")]
         Some("--file-manager") => {
             trace::init();
             pump::set_live();
@@ -347,6 +354,8 @@ pub fn run() -> nd::Result<()> {
         if !properties.is_empty() {
             properties::open(cx, window.id(), properties.clone());
         }
+        // nd-allow(cfg-target-os): see the file_manager module.
+        #[cfg(target_os = "linux")]
         file_manager::start(cx, false);
     })
 }

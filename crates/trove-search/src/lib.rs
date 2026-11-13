@@ -4,6 +4,7 @@ mod index;
 mod live;
 mod matcher;
 mod mounts;
+mod os;
 mod overlay;
 mod persist;
 mod scan;
@@ -14,7 +15,6 @@ mod walk;
 
 use std::collections::HashSet;
 use std::io;
-use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::Relaxed, Ordering::SeqCst};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, RwLock};
@@ -344,7 +344,7 @@ fn run_query(inner: &Arc<Inner>, q: Query, tx: &flume::Sender<SearchEvent>, canc
 
 fn index_query(ix: &Index, ov: &Overlay, m: &Matcher, s: u32, q: &Query, cancel: &AtomicBool) -> Vec<Ranked> {
     let scan = Scan::new(ix, m, s, &ov.tomb, cancel);
-    let within = m.within_left(&fold(q.scope.file_name().map_or(&b""[..], |n| n.as_bytes())));
+    let within = m.within_left(&fold(q.scope.file_name().map_or(&b""[..], |n| n.as_encoded_bytes())));
     let ranked = |cands: Vec<scan::Cand>, fuzzy: bool| {
         cands.into_iter().map(move |c| Ranked { key: c.key, path: ix.path_of(c.idx), is_dir: ix.is_dir(c.idx), fuzzy })
     };
@@ -366,7 +366,7 @@ fn index_query(ix: &Index, ov: &Overlay, m: &Matcher, s: u32, q: &Query, cancel:
 fn to_hits(m: &Matcher, list: &[Ranked]) -> Vec<Hit> {
     list.iter()
         .map(|r| {
-            let name = r.path.file_name().map_or(&b""[..], |n| n.as_bytes());
+            let name = r.path.file_name().map_or(&b""[..], |n| n.as_encoded_bytes());
             Hit {
                 path: r.path.clone(),
                 is_dir: r.is_dir,

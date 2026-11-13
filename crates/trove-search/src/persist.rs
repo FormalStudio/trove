@@ -1,6 +1,5 @@
 use std::fs;
 use std::io;
-use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 
 use crate::index::{DIR, Index, NONE};
@@ -18,7 +17,7 @@ pub(crate) fn file_name() -> String {
 /// record array whole, then the names blob, then a checksum of everything before it.
 pub(crate) fn save(ix: &Index, path: &Path) -> io::Result<()> {
     let n = ix.len();
-    let root = ix.root.as_os_str().as_bytes();
+    let root = ix.root.as_os_str().as_encoded_bytes();
     let mut b = Vec::with_capacity(64 + root.len() + n * 26 + ix.names.len());
     b.extend_from_slice(MAGIC);
     b.extend_from_slice(&VERSION.to_le_bytes());
@@ -72,7 +71,7 @@ pub(crate) fn load(path: &Path, root: &Path) -> io::Result<Index> {
     let n = r.u32()? as usize;
     let names_len = r.u32()? as usize;
     let root_len = r.u32()? as usize;
-    if r.take(root_len)? != root.as_os_str().as_bytes() {
+    if r.take(root_len)? != root.as_os_str().as_encoded_bytes() {
         return Err(bad("root"));
     }
     let off = r.u32s(n.checked_add(1).ok_or_else(|| bad("count"))?)?;
@@ -137,12 +136,11 @@ fn bad(what: &str) -> io::Error {
 fn checksum(b: &[u8]) -> u64 {
     const K: u64 = 0x9e37_79b9_7f4a_7c15;
     let mut h = 0x243f_6a88_85a3_08d3 ^ b.len() as u64;
-    let mut words = b.chunks_exact(8);
-    for w in &mut words {
-        let w = u64::from_le_bytes(w.try_into().unwrap_or([0; 8]));
-        h = (h.rotate_left(5) ^ w).wrapping_mul(K);
+    let (words, rest) = b.as_chunks::<8>();
+    for w in words {
+        h = (h.rotate_left(5) ^ u64::from_le_bytes(*w)).wrapping_mul(K);
     }
-    for &x in words.remainder() {
+    for &x in rest {
         h = (h.rotate_left(5) ^ u64::from(x)).wrapping_mul(K);
     }
     h ^ (h >> 29)
@@ -171,12 +169,12 @@ impl<'a> Reader<'a> {
 
     fn u32s(&mut self, n: usize) -> io::Result<Vec<u32>> {
         let s = self.take(n.checked_mul(4).ok_or_else(|| bad("count"))?)?;
-        Ok(s.chunks_exact(4).map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect())
+        Ok(s.as_chunks::<4>().0.iter().map(|c| u32::from_le_bytes(*c)).collect())
     }
 
     fn u64s(&mut self, n: usize) -> io::Result<Vec<u64>> {
         let s = self.take(n.checked_mul(8).ok_or_else(|| bad("count"))?)?;
-        Ok(s.chunks_exact(8).map(|c| u64::from_le_bytes(c.try_into().unwrap_or([0; 8]))).collect())
+        Ok(s.as_chunks::<8>().0.iter().map(|c| u64::from_le_bytes(*c)).collect())
     }
 }
 

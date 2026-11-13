@@ -129,6 +129,7 @@ fn notes_keep_results_right() {
     assert_eq!(rel(&run(&s, "zebra", h).0, h), ["zebra2.txt"]);
 }
 
+#[cfg(unix)]
 #[test]
 fn live_walk_outside_the_index() {
     let home = tempfile::tempdir().unwrap();

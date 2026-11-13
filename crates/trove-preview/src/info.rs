@@ -1,5 +1,4 @@
 use std::fs::{self, Metadata};
-use std::os::unix::fs::{FileTypeExt, MetadataExt};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
@@ -57,8 +56,8 @@ pub fn info_blocking(path: &Path) -> Option<Info> {
         accessed: target.accessed().ok(),
         mode: mode_string(&lstat),
         access: access_of(path),
-        owner: user_name(lstat.uid()),
-        group: group_name(lstat.gid()),
+        owner: owner_name(&lstat),
+        group: group_name_of(&lstat),
         mime,
         link_target,
         dimensions,
@@ -86,6 +85,7 @@ impl Access {
     }
 }
 
+#[cfg(unix)]
 fn access_of(path: &Path) -> Access {
     use std::os::unix::ffi::OsStrExt;
     let Ok(c) = std::ffi::CString::new(path.as_os_str().as_bytes()) else { return Access::None };
@@ -99,24 +99,18 @@ fn access_of(path: &Path) -> Access {
     }
 }
 
+#[cfg(not(unix))]
+fn access_of(path: &Path) -> Access {
+    match fs::metadata(path) {
+        Ok(m) if m.permissions().readonly() => Access::ReadOnly,
+        Ok(_) => Access::ReadWrite,
+        Err(_) => Access::None,
+    }
+}
+
 pub(crate) fn mode_string(m: &Metadata) -> String {
-    let ft = m.file_type();
-    let kind = if ft.is_dir() {
-        'd'
-    } else if ft.is_symlink() {
-        'l'
-    } else if ft.is_block_device() {
-        'b'
-    } else if ft.is_char_device() {
-        'c'
-    } else if ft.is_fifo() {
-        'p'
-    } else if ft.is_socket() {
-        's'
-    } else {
-        '-'
-    };
-    let mode = m.mode();
+    let kind = kind_char(m.file_type());
+    let mode = trove_fs::os::mode_uid_gid(m).0;
     let bit = |mask: u32, ch: char| if mode & mask != 0 { ch } else { '-' };
     let exec = |x: u32, special: u32, on: char, off: char| match (mode & x != 0, mode & special != 0) {
         (true, true) => on,
@@ -140,6 +134,59 @@ pub(crate) fn mode_string(m: &Metadata) -> String {
     .collect()
 }
 
+#[cfg(unix)]
+fn kind_char(ft: fs::FileType) -> char {
+    use std::os::unix::fs::FileTypeExt;
+    if ft.is_dir() {
+        'd'
+    } else if ft.is_symlink() {
+        'l'
+    } else if ft.is_block_device() {
+        'b'
+    } else if ft.is_char_device() {
+        'c'
+    } else if ft.is_fifo() {
+        'p'
+    } else if ft.is_socket() {
+        's'
+    } else {
+        '-'
+    }
+}
+
+#[cfg(not(unix))]
+fn kind_char(ft: fs::FileType) -> char {
+    if ft.is_dir() {
+        'd'
+    } else if ft.is_symlink() {
+        'l'
+    } else {
+        '-'
+    }
+}
+
+#[cfg(unix)]
+fn owner_name(m: &Metadata) -> String {
+    user_name(trove_fs::os::mode_uid_gid(m).1)
+}
+
+#[cfg(unix)]
+fn group_name_of(m: &Metadata) -> String {
+    group_name(trove_fs::os::mode_uid_gid(m).2)
+}
+
+/// Windows owners are SIDs; the pane shows nothing for them.
+#[cfg(not(unix))]
+fn owner_name(_: &Metadata) -> String {
+    String::new()
+}
+
+#[cfg(not(unix))]
+fn group_name_of(_: &Metadata) -> String {
+    String::new()
+}
+
+#[cfg(unix)]
 fn user_name(uid: u32) -> String {
     let mut buf = vec![0u8; 1024];
     loop {
@@ -158,7 +205,7 @@ fn user_name(uid: u32) -> String {
         return unsafe { std::ffi::CStr::from_ptr(pw.pw_name) }.to_string_lossy().into_owned();
     }
 }
-
+#[cfg(unix)]
 fn group_name(gid: u32) -> String {
     let mut buf = vec![0u8; 1024];
     loop {
@@ -181,8 +228,10 @@ fn group_name(gid: u32) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
     use std::os::unix::fs::{PermissionsExt, symlink};
 
+    #[cfg(unix)]
     #[test]
     fn mode_strings() {
         let dir = tempfile::tempdir().unwrap();
@@ -196,6 +245,7 @@ mod tests {
         assert_eq!(mode_string(&fs::metadata(dir.path()).unwrap()), "drwxrwxrwt");
     }
 
+    #[cfg(unix)]
     #[test]
     fn info_for_file_dir_and_link() {
         let dir = tempfile::tempdir().unwrap();

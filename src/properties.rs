@@ -57,10 +57,7 @@ fn read_facts(paths: &[PathBuf]) -> Facts {
     let one = (infos.len() == 1).then(|| &infos[0]);
     let modes: Vec<(PathBuf, u32)> = paths
         .iter()
-        .filter_map(|p| {
-            use std::os::unix::fs::MetadataExt;
-            std::fs::metadata(p).ok().map(|m| (p.clone(), m.mode() & 0o7777))
-        })
+        .filter_map(|p| std::fs::metadata(p).ok().map(|m| (p.clone(), trove_fs::os::mode_uid_gid(&m).0)))
         .collect();
     let editable = !modes.is_empty()
         && modes.iter().all(|(p, _)| trove_ops::props::owner_of(p).is_some_and(trove_ops::props::may_change_mode));

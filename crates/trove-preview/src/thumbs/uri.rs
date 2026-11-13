@@ -29,10 +29,9 @@ fn is_path_safe(b: u8) -> bool {
 /// `file://` URI of an absolute path. Symlinks are not resolved: the spec keys on the path an
 /// app was given.
 pub(crate) fn file_uri(path: &Path) -> String {
-    use std::os::unix::ffi::OsStrExt;
     let abs = std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf());
     let mut uri = String::from("file://");
-    for &b in abs.as_os_str().as_bytes() {
+    for &b in abs.as_os_str().as_encoded_bytes() {
         if is_path_safe(b) {
             uri.push(char::from(b));
         } else {

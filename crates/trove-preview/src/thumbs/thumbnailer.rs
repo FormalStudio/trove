@@ -1,5 +1,4 @@
 use std::collections::{HashMap, HashSet};
-use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::Arc;
@@ -301,14 +300,11 @@ impl Registry {
 pub(crate) fn run(t: &Thumbnailer, input: &Path, uri: &str, output: &Path, size: u32, timeout: Duration) -> bool {
     let cmd = t.command_line(input, uri, output, size);
     let Some((program, args)) = cmd.argv.split_first() else { return false };
-    let spawned = Command::new(program)
-        .args(args)
-        .envs(cmd.env.iter().cloned())
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .process_group(0)
-        .spawn();
+    let mut command = Command::new(program);
+    command.args(args).envs(cmd.env.iter().cloned()).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+    #[cfg(unix)]
+    std::os::unix::process::CommandExt::process_group(&mut command, 0);
+    let spawned = command.spawn();
     let Ok(mut child) = spawned else { return false };
     wait_or_kill(&mut child, timeout)
 }
@@ -324,8 +320,11 @@ fn wait_or_kill(child: &mut Child, timeout: Duration) -> bool {
                 nap = (nap * 2).min(Duration::from_millis(40));
             }
             _ => {
+                #[cfg(unix)]
                 // SAFETY: signalling the process group the child leads; the pid is ours.
-                unsafe { libc::kill(-(child.id() as i32), libc::SIGKILL) };
+                unsafe {
+                    libc::kill(-(child.id() as i32), libc::SIGKILL)
+                };
                 let _ = child.kill();
                 let _ = child.wait();
                 return false;
@@ -338,8 +337,10 @@ fn wait_or_kill(child: &mut Child, timeout: Duration) -> bool {
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
     const FILE: &str = "[Thumbnailer Entry]\nTryExec=sh\nExec=sh -c \"echo %i > %o\" --size=%s %u 100%%\nMimeType=video/mp4;video/x-matroska;\n";
 
+    #[cfg(unix)]
     #[test]
     fn parses_entry_and_substitutes_codes() {
         let t = parse(FILE).unwrap();
@@ -402,6 +403,7 @@ mod tests {
         assert_eq!(cmd.argv[2], r#"cp "$TROVE_ARG_1" ''"$TROVE_ARG_2"''"#);
     }
 
+    #[cfg(unix)]
     #[test]
     fn real_shell_writes_the_literal_name_and_runs_nothing() {
         let dir = tempfile::tempdir().unwrap();

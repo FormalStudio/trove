@@ -1,6 +1,5 @@
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufWriter, Read, Write};
-use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Duration;
@@ -11,7 +10,7 @@ use zip::{CompressionMethod, DateTime, ZipArchive, ZipWriter};
 use crate::fsops::{CHUNK, count};
 use crate::job::{At, Ctx, R, Stop, fail, io_message, name_of};
 use crate::names::{exists, free_name, split_ext};
-use crate::trash::local_time;
+use crate::sys::{self, ModeExt, local_time};
 
 fn zip_err(e: zip::result::ZipError) -> Stop {
     Stop::Failed(e.to_string())
@@ -44,7 +43,7 @@ pub(crate) fn compress(ctx: &mut Ctx, paths: &[PathBuf], dest: &Path) -> R<()> {
     count(ctx, paths)?;
 
     let tmp = dir.join(format!(".{}.trove-part", name_of(&final_path)));
-    let file = OpenOptions::new().write(true).create_new(true).mode(0o666).open(&tmp).at(&tmp)?;
+    let file = OpenOptions::new().write(true).create_new(true).unix_mode(0o666).open(&tmp).at(&tmp)?;
     let mut guard = Part(tmp.clone(), true);
     let mut zip = ZipWriter::new(BufWriter::new(file));
     for path in paths {
@@ -69,7 +68,7 @@ fn add_entry<W: Write + io::Seek>(ctx: &mut Ctx, zip: &mut ZipWriter<W>, path: &
     let m = fs::symlink_metadata(path).at(path)?;
     let mut opts = SimpleFileOptions::default()
         .compression_method(CompressionMethod::Deflated)
-        .unix_permissions(m.mode() & 0o7777)
+        .unix_permissions(sys::mode(&m) & 0o7777)
         .large_file(m.len() >= u64::from(u32::MAX));
     if let Some(t) = zip_time(&m) {
         opts = opts.last_modified_time(t);
@@ -130,7 +129,8 @@ fn archive_stem(name: &str) -> &str {
 
 pub(crate) fn find_in_path(tool: &str) -> Option<PathBuf> {
     let path = std::env::var_os("PATH")?;
-    std::env::split_paths(&path).map(|d| d.join(tool)).find(|p| p.is_file())
+    let file = sys::exe_name(tool);
+    std::env::split_paths(&path).map(|d| d.join(&*file)).find(|p| p.is_file())
 }
 
 pub(crate) fn extract(ctx: &mut Ctx, archive: &Path, dest_dir: &Path) -> R<()> {
@@ -236,13 +236,9 @@ fn extract_zip(ctx: &mut Ctx, archive: &Path, staging: &Path) -> R<()> {
             if entry.is_symlink() {
                 let mut target = String::new();
                 entry.read_to_string(&mut target).at(&out)?;
-                std::os::unix::fs::symlink(target, &out).at(&out)?;
+                sys::symlink(Path::new(&target), &out).at(&out)?;
             } else {
-                let mut f = OpenOptions::new()
-                    .write(true)
-                    .create_new(true)
-                    .mode(0o600)
-                    .custom_flags(libc::O_NOFOLLOW)
+                let mut f = sys::no_follow(OpenOptions::new().write(true).create_new(true).unix_mode(0o600))
                     .open(&out)
                     .at(&out)?;
                 let mut buf = vec![0u8; CHUNK.min(256 * 1024)];
@@ -256,7 +252,7 @@ fn extract_zip(ctx: &mut Ctx, archive: &Path, staging: &Path) -> R<()> {
                     ctx.add_bytes(n as u64);
                 }
                 if let Some(mode) = entry.unix_mode() {
-                    f.set_permissions(fs::Permissions::from_mode(mode & 0o7777)).at(&out)?;
+                    sys::set_file_mode(&f, mode & 0o7777).at(&out)?;
                 }
             }
         }

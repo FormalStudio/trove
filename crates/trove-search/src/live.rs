@@ -1,5 +1,4 @@
 use std::collections::HashSet;
-use std::os::unix::ffi::OsStrExt;
 use std::path::{Component, Path};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::Relaxed};
 use std::time::{Duration, Instant};
@@ -43,7 +42,7 @@ pub(crate) fn search(
     let stop = AtomicBool::new(false);
     let scanned = AtomicU64::new(0);
     let truncated = AtomicBool::new(false);
-    let within = m.within_left(&fold(scope.file_name().map_or(&b""[..], |n| n.as_bytes())));
+    let within = m.within_left(&fold(scope.file_name().map_or(&b""[..], |n| n.as_encoded_bytes())));
     let (tx, rx) = flume::unbounded::<Ranked>();
     let prune = Prune::new(scope, mounts, m.allow_hidden);
     let base_sub = base.iter().filter(|r| !r.fuzzy).count();
@@ -119,7 +118,7 @@ pub(crate) fn search(
 }
 
 fn rate(scope: &Path, e: &ignore::DirEntry, is_dir: bool, m: &Matcher, within: &[Vec<u8>]) -> Option<Ranked> {
-    let name = e.file_name().as_bytes();
+    let name = e.file_name().as_encoded_bytes();
     let lower = fold(name);
     let kind = if m.kinds != 0 && !is_dir { kind_code(name) } else { 0 };
     if !m.cheap_ok(&lower, is_dir, kind) {
@@ -139,7 +138,7 @@ fn rate(scope: &Path, e: &ignore::DirEntry, is_dir: bool, m: &Matcher, within: &
         .map(|p| {
             p.components()
                 .filter_map(|c| match c {
-                    Component::Normal(n) => Some(n.as_bytes()),
+                    Component::Normal(n) => Some(n.as_encoded_bytes()),
                     _ => None,
                 })
                 .collect()

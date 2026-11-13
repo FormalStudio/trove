@@ -7,12 +7,47 @@ rust-version.workspace = true
 
 [dependencies]
 flume.workspace = true
+trove-fs.workspace = true
 zip = { version = "9.2.1", default-features = false, features = ["deflate-flate2-zlib-rs"] }
 mime_guess = "2.0.5"
 infer = "0.22.0"
-libc = "0.2"
 percent-encoding = "2"
 regex = "1.13"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", default-features = false, features = [
+    "std",
+    "NSArray",
+    "NSDictionary",
+    "FoundationErrors",
+    "NSEnumerator",
+    "NSError",
+    "NSFileManager",
+    "NSObject",
+    "NSString",
+    "NSURL",
+    "NSValue",
+] }
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSPasteboard"] }
+
+[target.'cfg(windows)'.dependencies]
+jiff = "0.2"
+trash = { version = "5.3", default-features = false, features = ["coinit_apartmentthreaded"] }
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Com",
+    "Win32_System_DataExchange",
+    "Win32_System_Memory",
+    "Win32_System_Ole",
+    "Win32_System_Threading",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+] }
 
 [lints]
 workspace = true

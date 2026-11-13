@@ -1,12 +1,13 @@
 use std::fs::{self, File, FileTimes, Metadata, OpenOptions};
 use std::io::{self, Read, Write};
+#[cfg(target_os = "linux")]
 use std::os::fd::AsRawFd;
-use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt, symlink};
 use std::path::{Path, PathBuf};
 
 use crate::Resolution;
 use crate::job::{At, Ctx, R, Stop, fail, name_of};
 use crate::names::{copy_name, exists, free_name, keep_both};
+use crate::sys::{self, ModeExt};
 
 pub(crate) const CHUNK: usize = 1 << 20;
 
@@ -22,7 +23,7 @@ fn meta(path: &Path) -> R<Metadata> {
 
 fn same_file(a: &Path, b: &Path) -> bool {
     match (fs::symlink_metadata(a), fs::symlink_metadata(b)) {
-        (Ok(x), Ok(y)) => x.dev() == y.dev() && x.ino() == y.ino(),
+        (Ok(x), Ok(y)) => sys::same_file(&x, a, &y, b),
         _ => false,
     }
 }
@@ -78,9 +79,9 @@ pub(crate) fn transfer(ctx: &mut Ctx, mode: Mode, items: &[(PathBuf, PathBuf)]) 
         }
     }
     let cross_device = items.iter().any(|(src, dest)| {
-        let a = fs::symlink_metadata(src).map(|m| m.dev());
-        let b = fs::metadata(dest).map(|m| m.dev());
-        a.ok() != b.ok()
+        let a = fs::symlink_metadata(src).ok().and_then(|m| sys::dev(&m, src));
+        let b = fs::metadata(dest).ok().and_then(|m| sys::dev(&m, dest));
+        a != b
     });
     if mode == Mode::Copy || cross_device {
         let sources: Vec<PathBuf> = items.iter().map(|(s, _)| s.clone()).collect();
@@ -202,7 +203,7 @@ pub(crate) fn move_entry(ctx: &mut Ctx, src: &Path, dest: &Path, replace: bool) 
     #[cfg(not(test))]
     let forced = false;
     let renamed = if forced {
-        Err(io::Error::from_raw_os_error(libc::EXDEV))
+        Err(io::Error::from_raw_os_error(sys::CROSS_DEVICE))
     } else if replace {
         fs::rename(src, dest)
     } else {
@@ -213,7 +214,7 @@ pub(crate) fn move_entry(ctx: &mut Ctx, src: &Path, dest: &Path, replace: bool) 
             ctx.finish_item();
             Ok(())
         }
-        Err(e) if e.raw_os_error() == Some(libc::EXDEV) => {
+        Err(e) if e.raw_os_error() == Some(sys::CROSS_DEVICE) => {
             let skipped = ctx.skipped;
             copy_entry(ctx, src, dest, replace)?;
             if ctx.skipped == skipped { remove_all(src).at(src) } else { Ok(()) }
@@ -271,14 +272,14 @@ pub(crate) fn copy_entry(ctx: &mut Ctx, src: &Path, dest: &Path, replace: bool) 
     if ft.is_dir() {
         let existing = replace && fs::symlink_metadata(dest).is_ok_and(|d| is_real_dir(&d));
         if !existing {
-            fs::DirBuilder::new().mode((m.mode() & 0o7777) | 0o700).create(dest).at(dest)?;
+            fs::DirBuilder::new().unix_mode((sys::mode(&m) & 0o7777) | 0o700).create(dest).at(dest)?;
         }
         for entry in fs::read_dir(src).at(src)? {
             let child = entry.at(src)?.path();
             copy_entry(ctx, &child, &dest.join(name_of(&child)), replace)?;
         }
         if !existing {
-            fs::set_permissions(dest, fs::Permissions::from_mode(m.mode() & 0o7777)).at(dest)?;
+            sys::set_mode(dest, sys::mode(&m) & 0o7777).at(dest)?;
             apply_times(dest, &m);
         }
         ctx.finish_item();
@@ -287,7 +288,7 @@ pub(crate) fn copy_entry(ctx: &mut Ctx, src: &Path, dest: &Path, replace: bool) 
         if replace && fs::symlink_metadata(dest).is_ok() {
             fs::remove_file(dest).at(dest)?;
         }
-        symlink(&target, dest).at(dest)?;
+        sys::copy_symlink(&ft, &target, dest).at(dest)?;
         ctx.finish_item();
     } else if ft.is_file() {
         copy_file(ctx, src, dest, replace, &m)?;
@@ -335,13 +336,13 @@ fn copy_file(ctx: &mut Ctx, src: &Path, dest: &Path, replace: bool, m: &Metadata
     let tmp = (replace && exists(dest)).then(|| part_path(dest));
     let target = tmp.as_deref().unwrap_or(dest);
     let mut input = File::open(src).at(src)?;
-    let mut output = OpenOptions::new().write(true).create_new(true).mode(0o600).open(target).at(target)?;
+    let mut output = OpenOptions::new().write(true).create_new(true).unix_mode(0o600).open(target).at(target)?;
     let mut guard = Partial { path: target.to_path_buf(), armed: true };
     copy_data(ctx, &mut input, &mut output, m.len()).map_err(|e| match e {
         Stop::Failed(msg) => Stop::Failed(format!("{}: {msg}", name_of(src))),
         other => other,
     })?;
-    output.set_permissions(fs::Permissions::from_mode(m.mode() & 0o7777)).at(target)?;
+    sys::set_file_mode(&output, sys::mode(m) & 0o7777).at(target)?;
     let mut times = FileTimes::new();
     if let Ok(t) = m.accessed() {
         times = times.set_accessed(t);
@@ -407,6 +408,7 @@ fn copy_data(ctx: &mut Ctx, input: &mut File, output: &mut File, len: u64) -> R<
     }
 }
 
+#[cfg(target_os = "linux")]
 fn cfr_unsupported(e: &io::Error) -> bool {
     matches!(
         e.raw_os_error(),
@@ -439,8 +441,13 @@ fn copy_range(input: &File, output: &File) -> io::Result<usize> {
 }
 
 #[cfg(not(target_os = "linux"))]
+fn cfr_unsupported(_: &io::Error) -> bool {
+    true
+}
+
+#[cfg(not(target_os = "linux"))]
 fn copy_range(_: &File, _: &File) -> io::Result<usize> {
-    Err(io::Error::from_raw_os_error(libc::ENOSYS))
+    Err(io::ErrorKind::Unsupported.into())
 }
 
 /// Permanent delete, checking for cancel between items.
@@ -475,8 +482,8 @@ pub(crate) fn rename(ctx: &mut Ctx, path: &Path, new_name: &str) -> R<()> {
     if name.is_empty() {
         return fail("The name cannot be empty");
     }
-    if name.contains('/') || name.contains('\0') {
-        return fail("The name cannot contain \"/\"");
+    if name.contains(sys::bad_name_char) {
+        return fail(sys::BAD_NAME);
     }
     if name == "." || name == ".." {
         return fail(format!("\"{name}\" is not a valid name"));
@@ -493,7 +500,7 @@ pub(crate) fn rename(ctx: &mut Ctx, path: &Path, new_name: &str) -> R<()> {
     let renamed = match fs::symlink_metadata(&target) {
         // Same inode under a name differing only in case is a case-insensitive file system; a hard
         // link under another name is a different file, and rename(2) between links does nothing.
-        Ok(tm) if tm.dev() == m.dev() && tm.ino() == m.ino() && name_of(path).to_lowercase() == name.to_lowercase() => {
+        Ok(tm) if sys::same_file(&tm, &target, &m, path) && name_of(path).to_lowercase() == name.to_lowercase() => {
             fs::rename(path, &target)
         }
         Ok(_) => return fail(format!("\"{name}\" already exists")),
@@ -524,10 +531,10 @@ pub(crate) fn set_modes(ctx: &mut Ctx, modes: &[(PathBuf, u32)]) -> R<()> {
     for (path, bits) in modes {
         ctx.check_cancel()?;
         ctx.set_current(path);
-        let before = fs::metadata(path).at(path)?.mode() & 0o7777;
+        let before = sys::mode(&fs::metadata(path).at(path)?) & 0o7777;
         let after = bits & 0o7777;
         if before != after {
-            fs::set_permissions(path, fs::Permissions::from_mode(after)).at(path)?;
+            sys::set_mode(path, after).at(path)?;
             ctx.modes.push((path.clone(), before));
         }
         ctx.finish_item();
@@ -536,7 +543,7 @@ pub(crate) fn set_modes(ctx: &mut Ctx, modes: &[(PathBuf, u32)]) -> R<()> {
 }
 
 pub(crate) fn create(ctx: &mut Ctx, parent: &Path, name: &str, folder: bool) -> R<()> {
-    if name.is_empty() || name.contains('/') || name.contains('\0') || name == "." || name == ".." {
+    if name.is_empty() || name.contains(sys::bad_name_char) || name == "." || name == ".." {
         return fail(format!("\"{name}\" is not a valid name"));
     }
     if !fs::metadata(parent).at(parent)?.is_dir() {
@@ -546,9 +553,9 @@ pub(crate) fn create(ctx: &mut Ctx, parent: &Path, name: &str, folder: bool) -> 
     loop {
         let path = parent.join(&candidate);
         let made = if folder {
-            fs::DirBuilder::new().mode(0o777).create(&path)
+            fs::DirBuilder::new().unix_mode(0o777).create(&path)
         } else {
-            OpenOptions::new().write(true).create_new(true).mode(0o666).open(&path).map(drop)
+            OpenOptions::new().write(true).create_new(true).unix_mode(0o666).open(&path).map(drop)
         };
         match made {
             Ok(()) => {
@@ -581,14 +588,13 @@ mod tests {
     use crate::job::Stop;
     use crate::trash::TrashConfig;
     use crate::{JobId, OpEvent};
-    use std::os::unix::fs::FileTypeExt;
     use std::sync::Arc;
     use std::sync::atomic::AtomicBool;
 
     fn ctx() -> (Ctx, flume::Receiver<OpEvent>) {
         let (etx, erx) = flume::unbounded();
         let (_rtx, rrx) = flume::unbounded();
-        let cfg = TrashConfig { data_home: PathBuf::new(), uid: 0, mounts: Some(Vec::new()) };
+        let cfg = TrashConfig { data_home: PathBuf::new(), uid: 0, mounts: Some(Vec::new()), native: false };
         (Ctx::new(JobId(1), etx, rrx, Arc::new(AtomicBool::new(false)), Arc::new(cfg)), erx)
     }
 
@@ -625,8 +631,10 @@ mod tests {
         assert_eq!(fs::read_dir(d.path()).unwrap().count(), 2);
     }
 
+    #[cfg(unix)]
     #[test]
     fn copy_then_delete_is_the_cross_device_move() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
         let d = tempfile::tempdir().unwrap();
         let src = d.path().join("tree");
         fs::create_dir_all(src.join("sub/deep")).unwrap();
@@ -674,8 +682,10 @@ mod tests {
         assert_eq!(fs::read_to_string(dest.join("keep.txt")).unwrap(), "kept");
     }
 
+    #[cfg(unix)]
     #[test]
     fn cross_device_move_keeps_a_source_holding_special_files() {
+        use std::os::unix::fs::FileTypeExt;
         let d = tempfile::tempdir().unwrap();
         let src = d.path().join("tree");
         fs::create_dir(&src).unwrap();

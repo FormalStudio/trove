@@ -2,15 +2,16 @@
 
 # Trove
 
-A file manager for Linux that opens at once, even with a dead network mount in the sidebar.
-Rust on [NativeDesktop](https://github.com/FormalStudio/NativeDesktop) (GPUI on Linux), with
-tabs, three views, a preview pane, Quick Look and search across Home.
+A file manager for Linux, macOS and Windows that opens at once, even with a dead network mount
+in the sidebar. Rust on [NativeDesktop](https://github.com/FormalStudio/NativeDesktop) (GPUI on
+Linux, AppKit on macOS, Fluent on Windows), with tabs, three views, a preview pane, Quick Look
+and search across Home.
 
 ![The list view with the preview pane on a picture](docs/images/list.png)
 
 ```
 ┌────────────────────────┐  flume   ┌───────────────────────────────────────────────┐
-│ trove (nd, GPUI)       │ ───────▶ │ trove-fs       listing threads, inotify       │
+│ trove (nd, GPUI)       │ ───────▶ │ trove-fs       listing threads, watchers      │
 │ window, tabs, sidebar, │          │ trove-ops      the operation queue            │
 │ views, preview pane    │ ◀─────── │ trove-preview  previews, thumbnail pool       │
 └────────────────────────┘          │ trove-search   index of Home, query engine    │
@@ -55,8 +56,10 @@ minute, focused or behind another window.
   second and the window stays responsive.
 - Copy, move, rename, trash, restore, compress and extract run as queued jobs with progress,
   conflict handling and undo. Hold Ctrl while dragging to copy, Shift to move.
-- Interop with the rest of the desktop: the freedesktop Trash, the shared thumbnail cache, GTK
-  bookmarks, `recently-used.xbel`, and the GNOME Files clipboard format.
+- Interop with the rest of the desktop on Linux: the freedesktop Trash, the shared thumbnail
+  cache, GTK bookmarks, `recently-used.xbel`, and the GNOME Files clipboard format. On macOS and
+  Windows it uses the system Trash and keeps its bookmarks and thumbnails in its own folders;
+  Recent and Open with's app list are Linux only.
 - Follows the system: light and dark, the accent colour, and matugen palettes, live.
 - Writes an incident bundle when it crashes or hangs, with the last inputs and what was on screen.
 
@@ -64,7 +67,7 @@ minute, focused or behind another window.
 
 ### Linux
 
-Needs Rust 1.95 (pinned by `rust-toolchain.toml`) and, to build, `libxkbcommon`, `wayland`,
+Needs Rust 1.98 (pinned by `rust-toolchain.toml`) and, to build, `libxkbcommon`, `wayland`,
 `vulkan-loader`, `fontconfig`, `freetype`, `alsa-lib`.
 
 ```sh
@@ -101,12 +104,27 @@ Hyprland, `~/.config/xdg-desktop-portal/hyprland-portals.conf`, keeping its `def
 `org.freedesktop.impl.portal.FileChooser=trove`. xdg-desktop-portal reads its config when it
 starts, so log out and back in (or `systemctl --user restart xdg-desktop-portal`).
 
-`nd package linux` builds an AppImage into `target/nd/`. macOS (`nd package mac`) and Windows
-(`nd package windows`) builds come from the same source and are not published yet.
+`nd package linux` builds an AppImage into `target/nd/`.
+
+### macOS
+
+Needs Rust 1.98 and the Xcode command line tools.
+
+```sh
+cargo build --release
+nd package mac            # .app, .pkg and .dmg in target/nd/
+```
+
+### Windows
+
+Needs Rust 1.98 with the MSVC toolchain. From a Windows shell, `cargo build --release`; from
+macOS or Linux, `cargo xwin build --release --target x86_64-pc-windows-msvc`.
+`nd package windows` builds `Setup.exe`.
 
 ## Configuration
 
-Preferences live in `~/.config/trove/config.toml`, or per key as `TROVE_<KEY>`:
+Preferences live in `~/.config/trove/config.toml` on Linux and in the platform's config folder
+elsewhere, or per key as `TROVE_<KEY>`:
 
 ```toml
 show_hidden = false

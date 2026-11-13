@@ -3,6 +3,8 @@
 mod archive;
 pub mod batch;
 pub mod clipboard;
+// The registry loads everywhere; Exec expansion and terminals serve only the Linux launcher.
+#[cfg_attr(any(target_os = "macos", windows), allow(dead_code))]
 mod desktop;
 mod fsops;
 mod job;
@@ -10,6 +12,7 @@ mod names;
 pub mod open_with;
 pub mod props;
 mod queue;
+mod sys;
 pub mod trash;
 
 use std::path::PathBuf;

@@ -79,6 +79,7 @@ pub(crate) struct Ctx {
     pub tainted: bool,
     /// Fifos, sockets and device nodes a copy passed over.
     pub skipped: u64,
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code, reason = "only Linux has a clone ioctl to try"))]
     pub reflink: bool,
     #[cfg(test)]
     pub cancel_after_bytes: Option<u64>,

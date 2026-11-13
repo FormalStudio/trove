@@ -199,6 +199,7 @@ fn a_quick_change_of_selection_keeps_only_the_last() {
 }
 
 #[test]
+#[cfg_attr(target_os = "macos", ignore = "macOS opens the system Quick Look panel, not Trove's cover")]
 fn quick_look_opens_steps_through_the_folder_and_closes() {
     let mut h = Harness::at(look());
     h.select(&["photo.png"]);
@@ -224,6 +225,7 @@ fn quick_look_opens_steps_through_the_folder_and_closes() {
 }
 
 #[test]
+#[cfg_attr(target_os = "macos", ignore = "macOS opens the system Quick Look panel, not Trove's cover")]
 fn quick_look_steps_through_a_selection_of_several() {
     let mut h = Harness::at(look());
     h.select(&["long.txt", "second.png"]);

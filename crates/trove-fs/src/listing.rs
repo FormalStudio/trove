@@ -2,18 +2,23 @@ use std::collections::HashSet;
 use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::io;
-use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
-use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use inotify::{EventMask, Inotify, WatchMask};
-
 use crate::entry::{Entry, EntryId, EntryKind, Meta};
 use crate::volumes::network_here;
+
+#[cfg(target_os = "linux")]
+mod inotify_watch;
+#[cfg(not(target_os = "linux"))]
+mod notify_watch;
+
+#[cfg(target_os = "linux")]
+use inotify_watch::{Cancel, Watcher};
+#[cfg(not(target_os = "linux"))]
+use notify_watch::{Cancel, Watcher};
 
 const FIRST_CHUNK: usize = 256;
 const MAX_CHUNK: usize = 2048;
@@ -93,35 +98,6 @@ pub fn list(dir: PathBuf, _opts: ListOptions) -> Listing {
     Listing { events: rx, _cancel: CancelOnDrop(cancel) }
 }
 
-struct Cancel {
-    flag: AtomicBool,
-    /// Wakes the watcher's poll so a dropped listing releases its inotify instance at once.
-    wake: Option<OwnedFd>,
-}
-
-impl Cancel {
-    fn new() -> Self {
-        // SAFETY: eventfd takes plain integers; a valid result is an fd we own.
-        let fd = unsafe { libc::eventfd(0, libc::EFD_CLOEXEC | libc::EFD_NONBLOCK) };
-        // SAFETY: `fd` is a fresh descriptor not owned elsewhere.
-        let wake = (fd >= 0).then(|| unsafe { OwnedFd::from_raw_fd(fd) });
-        Self { flag: AtomicBool::new(false), wake }
-    }
-
-    fn is_set(&self) -> bool {
-        self.flag.load(Ordering::Relaxed)
-    }
-
-    fn trigger(&self) {
-        self.flag.store(true, Ordering::Relaxed);
-        if let Some(fd) = &self.wake {
-            let one = 1u64;
-            // SAFETY: writing 8 bytes from a live u64 to an eventfd we own.
-            unsafe { libc::write(fd.as_raw_fd(), (&raw const one).cast(), 8) };
-        }
-    }
-}
-
 struct CancelOnDrop(Arc<Cancel>);
 
 impl Drop for CancelOnDrop {
@@ -173,14 +149,15 @@ fn stat(path: &Path) -> io::Result<(EntryKind, Meta)> {
         },
         k => k,
     };
+    let (mode, uid, gid) = crate::os::mode_uid_gid(&md);
     let meta = Meta {
         size: md.len(),
         modified: md.modified().ok(),
         created: md.created().ok(),
         accessed: md.accessed().ok(),
-        mode: md.mode() & 0o7777,
-        uid: md.uid(),
-        gid: md.gid(),
+        mode,
+        uid,
+        gid,
         kind,
         child_count: None,
     };
@@ -216,7 +193,7 @@ fn run(dir: &Path, ctx: &Ctx) {
         }
     };
     // Armed before readdir so nothing that happens during the listing is missed.
-    let watcher = if network { None } else { Watcher::new(dir) };
+    let watcher = if network { None } else { Watcher::new(dir, &ctx.cancel) };
 
     let mut pool = Pool::new(dir, ctx, network, mounts);
     let mut known: Vec<EntryId> = Vec::new();
@@ -378,99 +355,15 @@ impl Pool {
     }
 }
 
-struct Watcher {
-    ino: Inotify,
-}
-
-impl Watcher {
-    fn new(dir: &Path) -> Option<Self> {
-        let ino = Inotify::init().ok()?;
-        let mask = WatchMask::CREATE
-            | WatchMask::DELETE
-            | WatchMask::MODIFY
-            | WatchMask::ATTRIB
-            | WatchMask::CLOSE_WRITE
-            | WatchMask::MOVED_FROM
-            | WatchMask::MOVED_TO
-            | WatchMask::DELETE_SELF
-            | WatchMask::MOVE_SELF
-            | WatchMask::ONLYDIR;
-        ino.watches().add(dir, mask).ok()?;
-        Some(Self { ino })
-    }
-
-    fn run(mut self, dir: &Path, mut known: HashSet<EntryId>, ctx: &Ctx) {
-        let ino_fd = self.ino.as_raw_fd();
-        let wake_fd = ctx.cancel.wake.as_ref().map(AsRawFd::as_raw_fd);
-        let mut buf = vec![0u8; 32 * 1024];
-        let mut batch = Batch::default();
-        let mut deadline: Option<Instant> = None;
-        loop {
-            let timeout = match (deadline, wake_fd) {
-                (Some(d), _) => d.saturating_duration_since(Instant::now()).as_millis().min(i32::MAX as u128) as i32,
-                (None, Some(_)) => -1,
-                (None, None) => 1000,
-            };
-            if !wait(ino_fd, wake_fd, timeout) || ctx.cancel.is_set() {
-                return;
-            }
-            loop {
-                match self.ino.read_events(&mut buf) {
-                    Ok(events) => {
-                        for ev in events {
-                            batch.add(ev.mask, ev.name, ev.cookie);
-                            deadline.get_or_insert_with(|| Instant::now() + COALESCE);
-                        }
-                    }
-                    Err(e) if e.kind() == io::ErrorKind::WouldBlock => break,
-                    Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
-                    Err(_) => return,
-                }
-            }
-            if deadline.is_some_and(|d| Instant::now() >= d) {
-                deadline = None;
-                let gone = batch.dir_gone;
-                let changes = std::mem::take(&mut batch).resolve(dir, &mut known);
-                for part in changes.chunks(MAX_CHUNK) {
-                    if !ctx.send(ListEvent::Changed(part.to_vec())) {
-                        return;
-                    }
-                }
-                if gone {
-                    ctx.send(ListEvent::Error(ListError::NotFound));
-                    return;
-                }
-            }
-        }
-    }
-}
-
-/// Blocks until the inotify fd is readable, the cancel fd fires or the timeout passes. False on a
-/// poll error.
-fn wait(ino_fd: RawFd, wake_fd: Option<RawFd>, timeout_ms: i32) -> bool {
-    let mut fds = [
-        libc::pollfd { fd: ino_fd, events: libc::POLLIN, revents: 0 },
-        libc::pollfd { fd: wake_fd.unwrap_or(-1), events: libc::POLLIN, revents: 0 },
-    ];
-    loop {
-        // SAFETY: `fds` is a valid array of two pollfds; a negative fd is ignored by poll.
-        let r = unsafe { libc::poll(fds.as_mut_ptr(), 2, timeout_ms) };
-        if r >= 0 {
-            return true;
-        }
-        if io::Error::last_os_error().kind() != io::ErrorKind::Interrupted {
-            return false;
-        }
-    }
-}
-
 #[derive(Default)]
 struct Batch {
     touched: Vec<OsString>,
     seen: HashSet<OsString>,
+    #[cfg(target_os = "linux")]
     moved_from: Vec<(u32, OsString)>,
     renames: Vec<(OsString, OsString)>,
     overflow: bool,
+    #[cfg(target_os = "linux")]
     dir_gone: bool,
 }
 
@@ -478,25 +371,6 @@ impl Batch {
     fn touch(&mut self, name: &OsStr) {
         if self.seen.insert(name.to_os_string()) {
             self.touched.push(name.to_os_string());
-        }
-    }
-
-    fn add(&mut self, mask: EventMask, name: Option<&OsStr>, cookie: u32) {
-        if mask.contains(EventMask::Q_OVERFLOW) {
-            self.overflow = true;
-        }
-        if mask.intersects(EventMask::DELETE_SELF | EventMask::MOVE_SELF | EventMask::UNMOUNT) {
-            self.dir_gone = true;
-        }
-        let Some(name) = name else { return };
-        self.touch(name);
-        if mask.contains(EventMask::MOVED_FROM) {
-            self.moved_from.push((cookie, name.to_os_string()));
-        } else if mask.contains(EventMask::MOVED_TO)
-            && let Some(i) = self.moved_from.iter().position(|(c, _)| *c == cookie)
-        {
-            let (_, from) = self.moved_from.swap_remove(i);
-            self.renames.push((from, name.to_os_string()));
         }
     }
 
@@ -569,7 +443,6 @@ impl Batch {
 mod tests {
     use super::*;
     use std::collections::HashMap;
-    use std::os::unix::fs::{PermissionsExt, symlink};
 
     const WAIT: Duration = Duration::from_secs(10);
 
@@ -683,8 +556,10 @@ mod tests {
         assert_eq!(c.listed, Some(0));
     }
 
+    #[cfg(unix)]
     #[test]
     fn kinds_symlinks_and_hidden() {
+        use std::os::unix::fs::symlink;
         let dir = tempfile::tempdir().expect("tempdir");
         let p = dir.path();
         fs::create_dir(p.join("sub")).expect("mkdir");
@@ -711,6 +586,8 @@ mod tests {
         assert!(by_name["a.txt"].1.modified.is_some());
     }
 
+    /// APFS and NTFS refuse names that are not Unicode.
+    #[cfg(target_os = "linux")]
     #[test]
     fn a_name_that_is_not_utf8_keeps_its_bytes() {
         use std::os::unix::ffi::OsStrExt;
@@ -737,8 +614,10 @@ mod tests {
         assert_eq!(err(dir.path().join("nope")), Some(ListError::NotFound));
         fs::write(dir.path().join("file"), b"").expect("write");
         assert_eq!(err(dir.path().join("file")), Some(ListError::NotADirectory));
+        #[cfg(unix)]
         // SAFETY: geteuid has no preconditions.
         if unsafe { libc::geteuid() } != 0 {
+            use std::os::unix::fs::PermissionsExt;
             let locked = dir.path().join("locked");
             fs::create_dir(&locked).expect("mkdir");
             fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).expect("chmod");

@@ -110,11 +110,7 @@ pub(crate) fn state_file(name: &str) -> PathBuf {
     if let Some(root) = std::env::var_os("ND_APP_DATA_DIR").filter(|d| !d.is_empty()) {
         return PathBuf::from(root).join("state").join(name);
     }
-    let state = std::env::var_os("XDG_STATE_HOME")
-        .map(PathBuf::from)
-        .filter(|p| p.is_absolute())
-        .unwrap_or_else(|| std::env::home_dir().unwrap_or_default().join(".local/state"));
-    state.join("trove").join(name)
+    trove_fs::state_home().join("trove").join(name)
 }
 
 fn store(cx: &mut App) -> &Store<Session> {

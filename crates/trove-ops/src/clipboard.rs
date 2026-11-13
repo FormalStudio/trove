@@ -1,13 +1,9 @@
-//! File clipboard. Always kept in process; when `wl-copy` is on PATH and `WAYLAND_DISPLAY` is
-//! set it is also offered as `x-special/gnome-copied-files`, which GNOME Files, Nautilus,
-//! Dolphin and Thunar read. `wl-copy` serves one type per process, so only that one is offered.
+//! File clipboard. Always kept in process, and offered to the system as
+//! `x-special/gnome-copied-files`: on Linux through `wl-copy` (see `wayland.rs`), on macOS and
+//! Windows by backends that turn that payload into the system's own file list and back.
 
-use std::io::{Read, Write};
-use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
 use std::sync::{Mutex, OnceLock};
-use std::time::{Duration, Instant};
 
 use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, percent_decode_str, utf8_percent_encode};
 
@@ -15,7 +11,6 @@ const GNOME: &str = "x-special/gnome-copied-files";
 const URI_LIST: &str = "text/uri-list";
 const KDE_CUT: &str = "x-kde-cut-selection";
 const PATH_SET: &AsciiSet = &NON_ALPHANUMERIC.remove(b'/').remove(b'-').remove(b'_').remove(b'.').remove(b'~');
-const TOOL_TIMEOUT: Duration = Duration::from_millis(1500);
 
 /// The system clipboard. Faked in tests.
 pub trait Backend: Send + Sync {
@@ -98,12 +93,22 @@ impl Clipboard {
     }
 }
 
+#[cfg(not(any(target_os = "macos", windows)))]
+#[path = "clipboard/wayland.rs"]
+mod system;
+#[cfg(target_os = "macos")]
+#[path = "clipboard/macos.rs"]
+mod system;
+#[cfg(windows)]
+#[path = "clipboard/windows.rs"]
+mod system;
+
 fn decode(s: &str) -> String {
     percent_decode_str(s).decode_utf8_lossy().into_owned()
 }
 
 fn encode_path(p: &Path) -> String {
-    utf8_percent_encode(&String::from_utf8_lossy(p.as_os_str().as_bytes()), PATH_SET).to_string()
+    utf8_percent_encode(&String::from_utf8_lossy(&trove_fs::os::uri_bytes(p)), PATH_SET).to_string()
 }
 
 fn gnome_payload(paths: &[PathBuf], cut: bool) -> String {
@@ -120,7 +125,7 @@ fn file_uri_path(line: &str) -> Option<PathBuf> {
     // "file://host/path" and "file:///path": the path starts at the first slash.
     let path = &rest[rest.find('/')?..];
     let bytes: Vec<u8> = percent_decode_str(path).collect();
-    Some(PathBuf::from(std::ffi::OsStr::from_bytes(&bytes)))
+    Some(trove_fs::os::path_from_uri_bytes(bytes))
 }
 
 fn parse_gnome(text: &str) -> Option<(Vec<PathBuf>, bool)> {
@@ -138,87 +143,9 @@ fn parse_uri_list(text: &str) -> Vec<PathBuf> {
     text.lines().filter(|l| !l.starts_with('#')).filter_map(file_uri_path).collect()
 }
 
-struct WaylandBackend;
-
-impl WaylandBackend {
-    fn available(tool: &str) -> bool {
-        std::env::var_os("WAYLAND_DISPLAY").is_some_and(|v| !v.is_empty())
-            && crate::archive::find_in_path(tool).is_some()
-    }
-}
-
-/// Runs `cmd` and returns stdout when it exits 0, killing it after `TOOL_TIMEOUT`.
-fn capture(cmd: &mut Command) -> Option<Vec<u8>> {
-    let mut child = cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn().ok()?;
-    let mut out = child.stdout.take()?;
-    let reader = std::thread::spawn(move || {
-        let mut buf = Vec::new();
-        let _ = out.read_to_end(&mut buf);
-        buf
-    });
-    let start = Instant::now();
-    let status = loop {
-        match child.try_wait().ok()? {
-            Some(s) => break s,
-            None if start.elapsed() > TOOL_TIMEOUT => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return None;
-            }
-            None => std::thread::sleep(Duration::from_millis(5)),
-        }
-    };
-    let buf = reader.join().ok()?;
-    status.success().then_some(buf)
-}
-
-impl Backend for WaylandBackend {
-    fn offer(&self, mime: &str, data: &[u8]) -> bool {
-        if !Self::available("wl-copy") {
-            return false;
-        }
-        let Ok(mut child) = Command::new("wl-copy")
-            .args(["--type", mime])
-            .stdin(Stdio::piped())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-        else {
-            return false;
-        };
-        let wrote = child.stdin.take().is_some_and(|mut s| s.write_all(data).is_ok());
-        // wl-copy forks the process that keeps serving the selection; this one exits at once.
-        let start = Instant::now();
-        loop {
-            match child.try_wait() {
-                Ok(Some(status)) => return wrote && status.success(),
-                Ok(None) if start.elapsed() < TOOL_TIMEOUT => std::thread::sleep(Duration::from_millis(5)),
-                _ => {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    return false;
-                }
-            }
-        }
-    }
-
-    fn types(&self) -> Option<Vec<String>> {
-        if !Self::available("wl-paste") {
-            return None;
-        }
-        // An empty clipboard makes wl-paste exit non-zero; that reads as no types.
-        let out = capture(Command::new("wl-paste").arg("--list-types")).unwrap_or_default();
-        Some(String::from_utf8_lossy(&out).lines().map(|l| l.trim().to_owned()).filter(|l| !l.is_empty()).collect())
-    }
-
-    fn read(&self, mime: &str) -> Option<Vec<u8>> {
-        capture(Command::new("wl-paste").args(["--no-newline", "--type", mime]))
-    }
-}
-
 fn global() -> &'static Clipboard {
     static GLOBAL: OnceLock<Clipboard> = OnceLock::new();
-    GLOBAL.get_or_init(|| Clipboard::new(Box::new(WaylandBackend)))
+    GLOBAL.get_or_init(|| Clipboard::new(Box::new(system::System)))
 }
 
 pub fn copy_files(paths: &[PathBuf], cut: bool) {

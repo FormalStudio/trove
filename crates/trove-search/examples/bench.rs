@@ -21,7 +21,7 @@ fn main() {
     let threads = std::thread::available_parallelism().map_or(1, |n| n.get());
     println!("threads available: {threads}");
 
-    let home = PathBuf::from(std::env::var_os("HOME").expect("HOME"));
+    let home = PathBuf::from(std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")).expect("HOME"));
     let cache = tempfile::tempdir().unwrap();
     let t = Instant::now();
     let s = Search::new(cache.path().to_path_buf(), home.clone());
@@ -61,6 +61,13 @@ fn report_file(cache: &Path) {
     }
 }
 
+/// Resident set figures come from `/proc`, so other systems report 0.
+#[cfg(not(target_os = "linux"))]
+fn rss_kb(_: &str) -> u64 {
+    0
+}
+
+#[cfg(target_os = "linux")]
 fn rss_kb(field: &str) -> u64 {
     let s = std::fs::read_to_string("/proc/self/status").unwrap();
     s.lines()

@@ -36,6 +36,7 @@ pub fn init(cx: &mut App) {
             trash.data_home = share.to_path_buf();
         }
         trash.mounts = Some(Vec::new());
+        trash.native = false;
     }
     let (ops, rx) = Ops::with_config(Config { trash });
     let jobs = cx.new(|_| Jobs::new(rx.clone()));

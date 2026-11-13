@@ -273,6 +273,7 @@ fn single_click_in_the_columns_view_leaves_folders_to_the_selection() {
     assert_eq!(h.tab().read(&h.cx).column_view().child(), Some(h.home.join("Documents")));
 }
 
+#[cfg(unix)]
 #[test]
 fn the_preview_says_what_you_may_do_with_a_file() {
     use std::os::unix::fs::PermissionsExt;

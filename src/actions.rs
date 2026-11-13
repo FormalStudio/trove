@@ -219,11 +219,12 @@ pub fn bind(cx: &mut App) {
         KeyBinding::new("escape", CancelPathEdit, Some(PATH_EDIT)),
         KeyBinding::new("tab", CompletePath, Some(PATH_EDIT)),
     ];
-    for n in 1..=9 {
-        keys.push(KeyBinding::new(&format!("alt-{n}"), SelectTab(n - 1), w));
+    let tabs = ["alt-1", "alt-2", "alt-3", "alt-4", "alt-5", "alt-6", "alt-7", "alt-8", "alt-9"];
+    for (n, key) in tabs.into_iter().enumerate() {
+        keys.push(KeyBinding::new(key, SelectTab(n), w));
     }
-    for c in TYPED.chars() {
-        keys.push(KeyBinding::new(&c.to_string(), TypeSelect(c), f));
+    for (i, c) in TYPED.char_indices() {
+        keys.push(KeyBinding::new(&TYPED[i..i + c.len_utf8()], TypeSelect(c), f));
     }
     cx.bind_keys(nd::actions::standard_bindings());
     cx.bind_keys(keys);
