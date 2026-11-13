@@ -1419,6 +1419,7 @@ impl Render for Tab {
                     let cell = cx.processor(Self::table_cell);
                     let list =
                         table(TABLE_ID, &self.table, self.columns(), move |id, col, w, cx| cell((id, col), w, cx))
+                            .inset()
                             .estimated_row_height(px(self.row_size().height))
                             .on_sort(move |e: &SortChanged, _, cx| {
                                 let _ = sort.update(cx, |t, cx| t.on_sort(e, cx));

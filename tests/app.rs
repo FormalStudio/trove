@@ -275,6 +275,18 @@ fn the_list_owns_the_selection_and_the_cursor() {
 }
 
 #[test]
+fn the_status_line_adds_up_a_selected_folder_once_it_is_walked() {
+    let mut h = Harness::new();
+    h.pick("files-table", &["Pictures"], Some("Pictures"));
+    let summary = |h: &Harness| h.root().read(&h.cx).status().read(&h.cx).summary(&h.cx).0;
+    let left = summary(&h);
+    assert!(left.starts_with("\u{201c}Pictures\u{201d} selected, ") && left.ends_with('B'), "{left}");
+
+    h.pick("files-table", &["Pictures", "Notes.md"], None);
+    assert!(summary(&h).starts_with("2 of 10 selected, "));
+}
+
+#[test]
 fn the_list_shown_has_the_keys() {
     let mut h = Harness::new();
     let window = h.window.id();

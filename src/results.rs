@@ -670,6 +670,7 @@ pub fn render(tab: &mut Tab, width: f32, cx: &mut Context<Tab>) -> AnyElement {
         r.by_id.iter().filter(|(_, row)| row.is_dir).map(|(id, _)| *id).collect();
     let out = ids.clone();
     let table = table(TABLE, &r.list, columns(width), move |id, col, w, cx| cell((id, col), w, cx))
+        .inset()
         .selection(Selection::multiple())
         .estimated_row_height(px(tab.row_size().height))
         .on_selection_change(move |e: &SelectionChanged<EntryId>, _, cx| {

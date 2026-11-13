@@ -428,6 +428,7 @@ pub fn render(tab: &mut Tab, cx: &mut Context<Tab>) -> AnyElement {
         let at = dir.clone();
         let dir_of_act = dir.clone();
         list(id.to_owned(), &level.list, move |key, w, cx| render((dir.clone(), key), w, cx))
+            .inset()
             .selection(Selection::single())
             .on_select(move |e: &SelectEvent<EntryId>, window, cx| {
                 let to = at.to_path_buf();
@@ -457,7 +458,7 @@ pub fn render(tab: &mut Tab, cx: &mut Context<Tab>) -> AnyElement {
         let id = format!("column-{i}");
         row_items.push(column(&id, level_list(level, &id, me.clone(), cx)));
     }
-    let current = list(CURRENT, &tab.extras.columns.current, cx.processor(Tab::current_row));
+    let current = list(CURRENT, &tab.extras.columns.current, cx.processor(Tab::current_row)).inset();
     let current = tab.file_list(current, &tab.extras.columns.current, cx).into_any_element();
     row_items.push(column(CURRENT, current));
     if let Some(child) = &tab.extras.columns.child {
