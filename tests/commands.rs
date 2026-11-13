@@ -3,6 +3,7 @@
 //! batch rename. Tests that change files run on a fixture of their own.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
+#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -99,7 +100,7 @@ impl Harness {
         self.settle();
     }
 
-    fn key(&mut self, keys: &str) {
+    fn key(&mut self, keys: &'static str) {
         let id = self.window.id();
         let stroke = Keystroke::parse(keys).unwrap();
         self.cx.dispatch_keystroke(id, &stroke);
@@ -265,6 +266,7 @@ fn type_select_takes_capitals_dashes_and_underscores() {
     assert_eq!(h.selected(), ["trove-0.1.0.tar.gz"], "a capital starts a name in either case");
 }
 
+#[cfg(unix)]
 #[test]
 fn properties_change_permissions_and_undo_takes_them_back() {
     let mut h = Harness::private();
@@ -292,6 +294,7 @@ fn properties_change_permissions_and_undo_takes_them_back() {
     assert_eq!(mode(&file), 0o644);
 }
 
+#[cfg(unix)]
 #[test]
 fn properties_over_several_items_show_mixed_bits_and_the_total() {
     let mut h = Harness::private();

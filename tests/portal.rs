@@ -1,5 +1,6 @@
 //! The portal and FileManager1 services on a private bus: a `dbus-daemon` of the test's own,
 //! never the session's, with a shell script standing in for `trove --pick`.
+#![cfg(target_os = "linux")]
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
 use std::collections::HashMap;

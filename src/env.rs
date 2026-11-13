@@ -64,7 +64,7 @@ pub fn use_demo(root: &Path) -> bool {
 fn system() -> Env {
     let home = std::env::home_dir().unwrap_or_else(|| PathBuf::from("/"));
     Env {
-        trash: trove_fs::trash_dir().join("files"),
+        trash: trove_fs::trash_files_dir(),
         places: trove_fs::user_dirs(),
         bookmarks: trove_fs::bookmarks(),
         templates: trove_fs::templates_dir(),

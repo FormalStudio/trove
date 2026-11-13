@@ -5,7 +5,7 @@ members = [".", "crates/*"]
 [workspace.package]
 edition = "2024"
 license = "MIT"
-rust-version = "1.95"
+rust-version = "1.98"
 
 [workspace.dependencies]
 trove-fs = { path = "crates/trove-fs" }
@@ -34,7 +34,7 @@ debug = "line-tables-only"
 name = "trove"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.95"
+rust-version = "1.98"
 
 [dependencies]
 trove-fs.workspace = true
@@ -47,11 +47,14 @@ jiff = "0.2"
 serde_json = "1"
 glob = "0.3"
 mime_guess = "2.0.5"
+nd = { git = "https://github.com/FormalStudio/NativeDesktop", branch = "main", features = ["settings-ui"] }
+
+# FileManager1 and the FileChooser portal backend are D-Bus services.
+[target.'cfg(target_os = "linux")'.dependencies]
 zbus = { version = "5.19", default-features = false, features = ["async-io"] }
 async-io = "2.6"
 async-process = "2.5"
 futures-lite = "2.6"
-nd = { git = "https://github.com/FormalStudio/NativeDesktop", branch = "main", features = ["settings-ui"] }
 
 [dev-dependencies]
 nd = { git = "https://github.com/FormalStudio/NativeDesktop", branch = "main", features = ["test", "audit"] }
@@ -78,11 +81,9 @@ workspace = true
 gpui-pre = { git = "https://github.com/FormalStudio/NativeDesktop", branch = "main" }
 gpui-fast = { git = "https://github.com/FormalStudio/NativeDesktop", branch = "main" }
 gpui-pre-apple = { git = "https://github.com/FormalStudio/NativeDesktop", branch = "main" }
-gpui-fast-apple = { git = "https://github.com/FormalStudio/NativeDesktop", branch = "main" }
 gpui-pre-linux = { git = "https://github.com/FormalStudio/NativeDesktop", branch = "main" }
 gpui-fast-linux = { git = "https://github.com/FormalStudio/NativeDesktop", branch = "main" }
 gpui-pre-wgpu = { git = "https://github.com/FormalStudio/NativeDesktop", branch = "main" }
 gpui-fast-wgpu = { git = "https://github.com/FormalStudio/NativeDesktop", branch = "main" }
 gpui-pre-windows = { git = "https://github.com/FormalStudio/NativeDesktop", branch = "main" }
-gpui-fast-windows = { git = "https://github.com/FormalStudio/NativeDesktop", branch = "main" }
 

@@ -177,7 +177,7 @@ impl Backend for System {
             }
             TEXT => {
                 let bytes = get(u32::from(CF_UNICODETEXT))?;
-                let units: Vec<u16> = bytes.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
+                let units: Vec<u16> = bytes.as_chunks::<2>().0.iter().map(|c| u16::from_le_bytes(*c)).collect();
                 let end = units.iter().position(|&u| u == 0).unwrap_or(units.len());
                 Some(String::from_utf16_lossy(&units[..end]).into_bytes())
             }

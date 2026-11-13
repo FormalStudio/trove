@@ -37,6 +37,11 @@ pub(super) fn bookmarks_file() -> PathBuf {
     dirs::config_dir().unwrap_or_else(home).join("trove").join("bookmarks")
 }
 
+/// `~/Library/Application Support` on macOS, `%LOCALAPPDATA%` on Windows.
+pub fn state_home() -> PathBuf {
+    dirs::data_local_dir().unwrap_or_else(home)
+}
+
 /// The system keeps no list of recent files that Trove can read here.
 pub fn recent(_limit: usize) -> Vec<PathBuf> {
     Vec::new()

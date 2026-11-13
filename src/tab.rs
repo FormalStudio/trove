@@ -1348,7 +1348,6 @@ fn child_of(child: &Location, parent: &Location) -> Option<EntryId> {
 /// Recent's entries, stat'd on a thread of their own: the list never touches the disk on the
 /// main thread, and files that have gone since are left out.
 fn recent_entries() -> flume::Receiver<Vec<(PathBuf, Entry)>> {
-    use std::os::unix::fs::MetadataExt;
     let (tx, rx) = flume::bounded(1);
     let _ = std::thread::Builder::new().name("trove-recent".into()).spawn(move || {
         let found = crate::env::recent(200)
@@ -1358,14 +1357,15 @@ fn recent_entries() -> flume::Receiver<Vec<(PathBuf, Entry)>> {
                 let kind = if md.is_dir() { EntryKind::Dir } else { EntryKind::File };
                 let mut entry = Entry::new(path.file_name()?, kind);
                 entry.id = EntryId::of(&path);
+                let (mode, uid, gid) = trove_fs::os::mode_uid_gid(&md);
                 entry.meta = Some(Meta {
                     size: md.len(),
                     modified: md.modified().ok(),
                     created: md.created().ok(),
                     accessed: md.accessed().ok(),
-                    mode: md.mode(),
-                    uid: md.uid(),
-                    gid: md.gid(),
+                    mode,
+                    uid,
+                    gid,
                     kind,
                     child_count: None,
                 });
@@ -1501,7 +1501,7 @@ impl Tab {
         let ids = self.drag_ids(state);
         let folders = self.folders.clone();
         carry_files_out(list, ids.clone())
-            .drag_rows(DRAG_FILES, move |id| ids.get(id).cloned().unwrap_or_default())
+            .drag_rows(DRAG_FILES, move |id| ids.get(id).cloned())
             .accepts_drops([DRAG_FILES, DragItem::FILES])
             .drop_on(move |id| folders.contains(id))
             .on_drop(move |e: &RowDropped<EntryId>, window, cx| {

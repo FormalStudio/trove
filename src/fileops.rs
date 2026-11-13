@@ -2,7 +2,6 @@
 //! Open with, bookmarks, the Trash, and drops. Each acts on the active tab's selection and
 //! submits to the app's `Ops`; what a job makes comes back selected (`ops::Jobs`).
 
-use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 
 use nd::prelude::*;
@@ -412,7 +411,7 @@ pub fn transfer(
     ops::background(
         root,
         move || {
-            let dev = |p: &Path| std::fs::symlink_metadata(p).ok().map(|m| m.dev());
+            let dev = |p: &Path| trove_fs::os::volume_id(p);
             let to = dev(&d);
             to.is_some() && s.iter().all(|p| dev(p) == to)
         },

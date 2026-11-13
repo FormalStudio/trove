@@ -63,3 +63,21 @@ pub fn path_from_uri_bytes(bytes: Vec<u8>) -> PathBuf {
     let drive = text.strip_prefix('/').filter(|r| r.as_bytes().get(1) == Some(&b':'));
     PathBuf::from(drive.unwrap_or(&text).replace('/', "\\"))
 }
+
+/// What tells two paths apart as being on different file systems, so a move between them is a
+/// copy. `None` when `path` cannot be read.
+#[cfg(unix)]
+pub fn volume_id(path: &Path) -> Option<u64> {
+    use std::os::unix::fs::MetadataExt;
+    std::fs::symlink_metadata(path).ok().map(|m| m.dev())
+}
+
+/// The drive letter or UNC share at the start of `path`, as Windows compares them.
+#[cfg(not(unix))]
+pub fn volume_id(path: &Path) -> Option<u64> {
+    use std::hash::{BuildHasher, BuildHasherDefault, DefaultHasher};
+    std::fs::symlink_metadata(path).ok()?;
+    let std::path::Component::Prefix(prefix) = path.components().next()? else { return None };
+    let key = prefix.as_os_str().to_string_lossy().to_uppercase();
+    Some(BuildHasherDefault::<DefaultHasher>::default().hash_one(key))
+}

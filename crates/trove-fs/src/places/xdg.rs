@@ -42,6 +42,14 @@ pub fn templates_dir() -> Option<PathBuf> {
     parse_templates_dir(&text, &home())
 }
 
+/// `$XDG_STATE_HOME`, else `~/.local/state`.
+pub fn state_home() -> PathBuf {
+    std::env::var_os("XDG_STATE_HOME")
+        .map(PathBuf::from)
+        .filter(|p| p.is_absolute())
+        .unwrap_or_else(|| std::env::home_dir().unwrap_or_default().join(".local/state"))
+}
+
 pub fn trash_dir() -> PathBuf {
     data_home().join("Trash")
 }

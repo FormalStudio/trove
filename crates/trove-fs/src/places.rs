@@ -61,7 +61,7 @@ use native as sys;
 #[cfg(target_os = "linux")]
 use xdg as sys;
 
-pub use sys::{recent, templates_dir, trash_dir, trash_files_dir, user_dirs};
+pub use sys::{recent, state_home, templates_dir, trash_dir, trash_files_dir, user_dirs};
 
 pub fn bookmarks() -> Vec<Place> {
     read_bookmarks(&sys::bookmarks_file())

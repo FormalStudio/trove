@@ -72,7 +72,7 @@ fn render_jpeg_scaled(path: &Path, edge: u32) -> Option<Rendered> {
     let rgba = match info.pixel_format {
         jpeg_decoder::PixelFormat::RGB24 => {
             let mut out = Vec::with_capacity(pixels.len() / 3 * 4);
-            for px in pixels.chunks_exact(3) {
+            for px in pixels.as_chunks::<3>().0 {
                 out.extend_from_slice(&[px[0], px[1], px[2], 255]);
             }
             out

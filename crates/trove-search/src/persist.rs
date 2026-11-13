@@ -136,12 +136,11 @@ fn bad(what: &str) -> io::Error {
 fn checksum(b: &[u8]) -> u64 {
     const K: u64 = 0x9e37_79b9_7f4a_7c15;
     let mut h = 0x243f_6a88_85a3_08d3 ^ b.len() as u64;
-    let mut words = b.chunks_exact(8);
-    for w in &mut words {
-        let w = u64::from_le_bytes(w.try_into().unwrap_or([0; 8]));
-        h = (h.rotate_left(5) ^ w).wrapping_mul(K);
+    let (words, rest) = b.as_chunks::<8>();
+    for w in words {
+        h = (h.rotate_left(5) ^ u64::from_le_bytes(*w)).wrapping_mul(K);
     }
-    for &x in words.remainder() {
+    for &x in rest {
         h = (h.rotate_left(5) ^ u64::from(x)).wrapping_mul(K);
     }
     h ^ (h >> 29)
@@ -170,12 +169,12 @@ impl<'a> Reader<'a> {
 
     fn u32s(&mut self, n: usize) -> io::Result<Vec<u32>> {
         let s = self.take(n.checked_mul(4).ok_or_else(|| bad("count"))?)?;
-        Ok(s.chunks_exact(4).map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect())
+        Ok(s.as_chunks::<4>().0.iter().map(|c| u32::from_le_bytes(*c)).collect())
     }
 
     fn u64s(&mut self, n: usize) -> io::Result<Vec<u64>> {
         let s = self.take(n.checked_mul(8).ok_or_else(|| bad("count"))?)?;
-        Ok(s.chunks_exact(8).map(|c| u64::from_le_bytes(c.try_into().unwrap_or([0; 8]))).collect())
+        Ok(s.as_chunks::<8>().0.iter().map(|c| u64::from_le_bytes(*c)).collect())
     }
 }
 

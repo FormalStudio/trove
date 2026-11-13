@@ -681,7 +681,7 @@ pub fn render(tab: &mut Tab, width: f32, cx: &mut Context<Tab>) -> AnyElement {
         .on_activate(move |e: &ActivateEvent<EntryId>, window, cx| {
             let _ = act.update(cx, |t, cx| t.activate(e.key, window, cx));
         })
-        .drag_rows(crate::actions::DRAG_FILES, move |id| ids.get(id).cloned().unwrap_or_default())
+        .drag_rows(crate::actions::DRAG_FILES, move |id| ids.get(id).cloned())
         .accepts_drops([crate::actions::DRAG_FILES, DragItem::FILES])
         .drop_on(move |id| folders.contains(id))
         .on_drop(move |e: &RowDropped<EntryId>, window, cx| {

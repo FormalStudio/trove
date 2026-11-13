@@ -6,8 +6,6 @@
 //! caller's extra choices, the name field when saving, the filter, Cancel and the accept button.
 //! Activating a file accepts, Escape cancels. It opens over the caller's window, modal to it.
 
-use std::ffi::OsString;
-use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::path::{Path, PathBuf};
 
 use nd::prelude::*;
@@ -108,7 +106,7 @@ pub enum Outcome {
 /// A portal byte string as a path: up to its nul.
 pub fn bytes_path(bytes: &[u8]) -> Option<PathBuf> {
     let end = bytes.iter().position(|b| *b == 0).unwrap_or(bytes.len());
-    (end > 0).then(|| PathBuf::from(OsString::from_vec(bytes[..end].to_vec())))
+    (end > 0).then(|| PathBuf::from(trove_fs::os::os_string_from_bytes(bytes[..end].to_vec())))
 }
 
 impl Request {
@@ -645,7 +643,7 @@ pub fn remember(cx: &mut App, folder: &Path) {
         return;
     }
     let store = store(cx);
-    store.update(|p| p.folder = Some(folder.as_os_str().as_bytes().to_vec()));
+    store.update(|p| p.folder = Some(folder.as_os_str().as_encoded_bytes().to_vec()));
     if let Err(e) = store.flush() {
         eprintln!("trove: remembering the picked folder: {e}");
     }
