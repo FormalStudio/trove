@@ -44,6 +44,12 @@ minute, focused or behind another window.
 - Disk Usage (Ctrl+U, or a folder's or volume's menu): a folder's items largest first beside a
   treemap coloured by the extensions that hold the most space. Double-click a folder to go into
   it, and move what you find to the Trash from there. `trove --usage <folder>` opens it alone.
+  Its Developer view lists linked git worktrees, build output (`target`, CMake trees, `.next`),
+  dependencies (`node_modules`, virtual environments) and caches wherever they sit under the
+  folder, largest first, and paints them on the map; `--usage <folder> --dev` starts there.
+- `trove du [--dev] [--json] [--depth N] [--top N] [folder]` runs the same walk without a
+  window and prints it, for a shell, a script or an agent. `--dev --json` gives each find's
+  path, kind and bytes, and `reclaimable_bytes` with nested finds counted once.
 - A network mount's folders are never read until clicked; only its free space is asked for,
   off the window thread. A folder that is slow to answer says "Waiting for server" after one
   second and the window stays responsive.
@@ -111,6 +117,7 @@ confirm_trash = false
 network_thumbnails = false
 list_zoom = 0             # 0 to 2, Ctrl+= and Ctrl+- in the list and columns views
 grid_zoom = 1             # 0 to 4, the same in the grid
+usage_developer = false   # Disk Usage opens on its Developer view
 ```
 
 | Variable | Effect |

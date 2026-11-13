@@ -32,6 +32,8 @@ pub struct TroveSettings {
     pub list_zoom: u8,
     /// Tile size in the grid view, 0 to 4 (Ctrl+= and Ctrl+- there).
     pub grid_zoom: u8,
+    /// Open Disk Usage on worktrees, build output, dependencies and caches.
+    pub usage_developer: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -90,6 +92,7 @@ impl Default for TroveSettings {
             network_thumbnails: false,
             list_zoom: 0,
             grid_zoom: crate::zoom::GRID_DEFAULT as u8,
+            usage_developer: false,
         }
     }
 }

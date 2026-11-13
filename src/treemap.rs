@@ -4,7 +4,7 @@
 
 use std::collections::HashMap;
 
-use trove_fs::{DuKind, DuNode};
+use trove_fs::{DevTag, DuKind, DuNode};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Rect {
@@ -142,6 +142,9 @@ pub enum Paint {
     Frame { odd: bool },
     /// A folder too small to show what is in it.
     Folder,
+    /// In the developer's view: a folder that can be rebuilt or fetched again, as one block,
+    /// or the ground of a worktree.
+    Tag(DevTag),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -175,8 +178,34 @@ const MAX_DEPTH: usize = 8;
 /// Past this many rectangles the smallest folders stay closed.
 const MAX_FILLS: usize = 20_000;
 
+/// What the map colours by.
+#[derive(Clone, Copy)]
+pub enum Colouring<'a> {
+    /// Files by the extensions that hold the most space.
+    Extensions(&'a Legend),
+    /// Worktrees, build output, dependencies and caches; every other file alike.
+    Developer,
+}
+
+impl Colouring<'_> {
+    fn file(self, node: &DuNode) -> Paint {
+        match self {
+            Colouring::Extensions(legend) => Paint::File(legend.slot(node)),
+            Colouring::Developer => Paint::File(SLOTS as u8),
+        }
+    }
+
+    /// The tag `folder` is painted with, and whether that is the whole of it.
+    fn folder(self, folder: &DuNode) -> Option<(DevTag, bool)> {
+        match (self, folder.tag) {
+            (Colouring::Developer, Some(tag)) => Some((tag, tag != DevTag::Worktree)),
+            _ => None,
+        }
+    }
+}
+
 /// The map of `folder` in a `w` by `h` area.
-pub fn build(folder: &DuNode, legend: &Legend, w: f32, h: f32) -> Map {
+pub fn build(folder: &DuNode, by: Colouring, w: f32, h: f32) -> Map {
     let mut map = Map::default();
     let sizes: Vec<u64> = folder.children.iter().map(|c| c.size).collect();
     for (child, rect) in squarify(&sizes, Rect::new(0., 0., w, h)).into_iter().enumerate() {
@@ -188,34 +217,43 @@ pub fn build(folder: &DuNode, legend: &Legend, w: f32, h: f32) -> Map {
         map.cells.push(Cell { rect, child, titled });
         let body = rect.inset(0.5);
         if !node.is_dir() {
-            map.fills.push(Fill { rect: body, paint: Paint::File(legend.slot(node)) });
+            map.fills.push(Fill { rect: body, paint: by.file(node) });
             continue;
         }
-        map.fills.push(Fill { rect: body, paint: Paint::Frame { odd: false } });
+        let tagged = by.folder(node);
+        let ground = tagged.map_or(Paint::Frame { odd: false }, |(tag, _)| Paint::Tag(tag));
+        map.fills.push(Fill { rect: body, paint: ground });
+        if tagged.is_some_and(|(_, whole)| whole) {
+            continue;
+        }
         let inner = if titled {
             Rect::new(body.x, body.y + TITLE_H, body.w, (body.h - TITLE_H).max(0.)).inset(1.)
         } else {
             body.inset(1.)
         };
-        nest(node, legend, inner, 1, &mut map.fills);
+        nest(node, by, inner, 1, &mut map.fills);
     }
     map
 }
 
-fn nest(folder: &DuNode, legend: &Legend, area: Rect, depth: usize, fills: &mut Vec<Fill>) {
+fn nest(folder: &DuNode, by: Colouring, area: Rect, depth: usize, fills: &mut Vec<Fill>) {
     let sizes: Vec<u64> = folder.children.iter().map(|c| c.size).collect();
     for (node, rect) in folder.children.iter().zip(squarify(&sizes, area)) {
         if rect.w < 1. && rect.h < 1. {
             break;
         }
         let body = rect.inset(0.5);
+        let tagged = by.folder(node);
         if !node.is_dir() {
-            fills.push(Fill { rect: body, paint: Paint::File(legend.slot(node)) });
+            fills.push(Fill { rect: body, paint: by.file(node) });
+        } else if let Some((tag, true)) = tagged {
+            fills.push(Fill { rect: body, paint: Paint::Tag(tag) });
         } else if depth < MAX_DEPTH && rect.w >= MIN_NESTED && rect.h >= MIN_NESTED && fills.len() < MAX_FILLS {
-            fills.push(Fill { rect: body, paint: Paint::Frame { odd: depth % 2 == 1 } });
-            nest(node, legend, body.inset(1.), depth + 1, fills);
+            let ground = tagged.map_or(Paint::Frame { odd: depth % 2 == 1 }, |(tag, _)| Paint::Tag(tag));
+            fills.push(Fill { rect: body, paint: ground });
+            nest(node, by, body.inset(1.), depth + 1, fills);
         } else {
-            fills.push(Fill { rect: body, paint: Paint::Folder });
+            fills.push(Fill { rect: body, paint: tagged.map_or(Paint::Folder, |(tag, _)| Paint::Tag(tag)) });
         }
     }
 }
@@ -226,12 +264,19 @@ mod tests {
     use trove_fs::FileKind;
 
     fn file(name: &str, size: u64) -> DuNode {
-        DuNode { name: name.into(), size, items: 0, kind: DuKind::File(FileKind::from_name(name)), children: vec![] }
+        DuNode {
+            name: name.into(),
+            size,
+            items: 0,
+            kind: DuKind::File(FileKind::from_name(name)),
+            tag: None,
+            children: vec![],
+        }
     }
 
     fn dir(name: &str, children: Vec<DuNode>) -> DuNode {
         let size = children.iter().map(|c| c.size).sum();
-        DuNode { name: name.into(), size, items: children.len() as u64, kind: DuKind::Dir, children }
+        DuNode { name: name.into(), size, items: children.len() as u64, kind: DuKind::Dir, tag: None, children }
     }
 
     #[test]
@@ -295,7 +340,7 @@ mod tests {
         assert_eq!(legend.slot(&file("x.bin", 1)), SLOTS as u8);
         assert_eq!(legend.slot(&file(".iso", 1)), 3);
         assert_eq!(legend.slot(&dir("x.mkv", vec![])), SLOTS as u8);
-        let map = build(&tree, &legend, 800., 500.);
+        let map = build(&tree, Colouring::Extensions(&legend), 800., 500.);
         assert_eq!(map.cells.len(), 2);
         assert!(map.cells[0].titled);
         assert!(!map.cells[1].titled);
@@ -309,6 +354,29 @@ mod tests {
             f.rect.y >= first.y + TITLE_H && f.rect.x >= first.x && f.rect.x + f.rect.w <= first.x + first.w + 0.01
         });
         assert!(inside);
-        assert!(build(&tree, &legend, 0., 0.).cells.is_empty());
+        assert!(build(&tree, Colouring::Extensions(&legend), 0., 0.).cells.is_empty());
+    }
+
+    #[test]
+    fn the_developer_map_paints_tagged_folders_whole_and_worktrees_as_ground() {
+        let tagged = |name: &str, tag, children| DuNode { tag: Some(tag), ..dir(name, children) };
+        let tree = dir(
+            "code",
+            vec![
+                tagged(
+                    "fix",
+                    DevTag::Worktree,
+                    vec![tagged("target", DevTag::Build, vec![file("app", 5000)]), file("a.rs", 900)],
+                ),
+                tagged("node_modules", DevTag::Deps, vec![file("x.js", 3000), file("y.js", 2000)]),
+            ],
+        );
+        let map = build(&tree, Colouring::Developer, 800., 500.);
+        let painted = |p: Paint| map.fills.iter().filter(|f| f.paint == p).count();
+        assert_eq!(painted(Paint::Tag(DevTag::Worktree)), 1);
+        assert_eq!(painted(Paint::Tag(DevTag::Build)), 1);
+        assert_eq!(painted(Paint::Tag(DevTag::Deps)), 1);
+        assert_eq!(painted(Paint::File(SLOTS as u8)), 1);
+        assert_eq!(map.fills.len(), 4);
     }
 }

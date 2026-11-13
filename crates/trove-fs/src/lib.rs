@@ -8,7 +8,10 @@ pub mod listing;
 pub mod places;
 pub mod volumes;
 
-pub use du::{DuEvent, Node as DuNode, NodeKind as DuKind, Progress as DuProgress, scan as du_scan};
+pub use du::{
+    DevTag, DuEvent, Found as DuFound, Node as DuNode, NodeKind as DuKind, Progress as DuProgress, dev_finds,
+    scan as du_scan, walk_blocking as du_walk,
+};
 pub use entry::{
     Entry, EntryId, EntryKind, FileKind, IdMap, IdSet, Meta, SortKey, SortOrder, natural_cmp, natural_key, sort_entries,
 };

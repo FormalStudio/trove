@@ -2,6 +2,8 @@
 //! beside a map where every file is a rectangle of its share of the space, coloured by kind.
 //! A double click on a folder shows that folder alone; the path above the list leads back out.
 //! The walk runs on `trove_fs::du_scan`'s threads and the window shows its count until it ends.
+//! The developer's view lists what can be rebuilt or fetched again instead: linked worktrees,
+//! build output, dependencies and caches, wherever they sit under the root.
 
 use std::path::PathBuf;
 use std::rc::Rc;
@@ -11,7 +13,7 @@ use std::time::Duration;
 
 use nd::core::WindowId;
 use nd::prelude::*;
-use trove_fs::{DuEvent, DuKind, DuNode, DuProgress, FileKind};
+use trove_fs::{DevTag, DuEvent, DuFound, DuKind, DuNode, DuProgress, FileKind};
 use trove_ops::{JobId, Op, OpEvent};
 
 use crate::actions::CopyPathOf;
@@ -20,8 +22,8 @@ use crate::icons;
 use crate::ops::{self, Origin};
 use crate::pump::pump;
 use crate::root::Start;
-use crate::theme::slot_color;
-use crate::treemap::{self, Cell, Legend, Map, Paint, SLOTS, TITLE_H};
+use crate::theme::{slot_color, tag_color};
+use crate::treemap::{self, Cell, Colouring, Legend, Map, Paint, SLOTS, TITLE_H};
 
 /// A file shown in its folder in a new window, or a folder opened in one.
 #[derive(Clone, PartialEq, Debug, Action)]
@@ -38,6 +40,7 @@ const LIST_W: f32 = 320.;
 const BAR_W: f32 = 48.;
 /// A file's rectangle carries its name from this size up.
 const NAMED_FILE: (f32, f32) = (96., 40.);
+const VIEWS: [&str; 2] = ["Kinds", "Developer"];
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Scan {
@@ -55,6 +58,9 @@ pub struct UsageView {
     stop: Arc<AtomicBool>,
     tree: Option<DuNode>,
     legend: Rc<Legend>,
+    /// Colours the map by what can be rebuilt and lists `finds` in place of the folder's items.
+    dev: bool,
+    finds: Rc<Vec<DuFound>>,
     /// The folder shown, as the child index at each level under the root.
     path: Vec<usize>,
     selected: Option<usize>,
@@ -112,6 +118,8 @@ impl UsageView {
             stop,
             tree: None,
             legend: Rc::default(),
+            dev: crate::settings::get(cx).usage_developer,
+            finds: Rc::default(),
             path: Vec::new(),
             selected: None,
             hovered: None,
@@ -131,15 +139,8 @@ impl UsageView {
     fn listen(&self, cx: &mut Context<Self>) {
         pump(self.events.clone(), cx.weak_entity(), |this: &mut Self, events, cx| {
             this.apply(events, cx);
-            this.scan == Scan::Running(this.progress())
+            matches!(this.scan, Scan::Running(_))
         });
-    }
-
-    fn progress(&self) -> DuProgress {
-        match self.scan {
-            Scan::Running(p) => p,
-            _ => DuProgress::default(),
-        }
     }
 
     fn apply(&mut self, events: Vec<DuEvent>, cx: &mut Context<Self>) {
@@ -148,10 +149,12 @@ impl UsageView {
                 DuEvent::Progress(p) => self.scan = Scan::Running(p),
                 DuEvent::Done(tree) => {
                     self.legend = Rc::new(Legend::of(&tree));
+                    self.finds = Rc::new(trove_fs::dev_finds(&tree));
                     self.tree = Some(Arc::unwrap_or_clone(tree));
                     self.scan = Scan::Done;
                     self.path.clear();
                     self.refocus(cx);
+                    self.relist(cx);
                 }
                 DuEvent::Failed => self.scan = Scan::Failed,
             }
@@ -174,9 +177,11 @@ impl UsageView {
         self.events = trove_fs::du_scan(self.root.clone(), self.stop.clone());
         self.scan = Scan::Running(DuProgress::default());
         self.tree = None;
+        self.finds = Rc::default();
         self.error = None;
         self.path.clear();
         self.refocus(cx);
+        self.relist(cx);
         self.listen(cx);
     }
 
@@ -225,14 +230,75 @@ impl UsageView {
         self.selected
     }
 
+    /// The folder shown changed: the map and the selection are of the old one.
     fn refocus(&mut self, cx: &mut Context<Self>) {
         self.generation += 1;
         self.selected = None;
         self.hovered = None;
-        let rows = self.folder().map_or(0, |f| f.children.len()) as u32;
-        let generation = self.generation;
-        self.list.set_items_versioned((0..rows).map(|i| (i, generation)), cx);
+        if !self.dev {
+            self.relist(cx);
+        }
         cx.notify();
+    }
+
+    /// Gives the list its rows: the shown folder's items, or every find in the developer's view.
+    fn relist(&mut self, cx: &mut Context<Self>) {
+        let rows = if self.dev { self.finds.len() } else { self.folder().map_or(0, |f| f.children.len()) } as u32;
+        let generation = self.generation;
+        self.list.set_selected(Vec::new(), cx);
+        self.list.set_items_versioned((0..rows).map(|i| (i, generation)), cx);
+    }
+
+    pub fn developer(&self) -> bool {
+        self.dev
+    }
+
+    /// What the developer's view lists, largest first.
+    pub fn finds(&self) -> &[DuFound] {
+        &self.finds
+    }
+
+    /// Switches between the map by kind and the developer's view.
+    pub fn set_developer(&mut self, on: bool, cx: &mut Context<Self>) {
+        if self.dev != on {
+            self.dev = on;
+            self.generation += 1;
+            self.relist(cx);
+            cx.notify();
+        }
+    }
+
+    /// The child index at each level down to `path`, which is under the root.
+    fn steps_to(&self, path: &std::path::Path) -> Option<Vec<usize>> {
+        let mut node = self.tree.as_ref()?;
+        let mut steps = Vec::new();
+        for name in path.iter() {
+            let at = node.children.iter().position(|c| name == c.name.as_str())?;
+            steps.push(at);
+            node = &node.children[at];
+        }
+        Some(steps)
+    }
+
+    /// Shows the folder the find `i` sits in, with the find selected in the map.
+    pub fn reveal(&mut self, i: usize, cx: &mut Context<Self>) {
+        let Some(mut steps) = self.finds.get(i).and_then(|f| self.steps_to(&f.path)) else { return };
+        let Some(child) = steps.pop() else { return };
+        if self.path != steps {
+            self.path = steps;
+            self.refocus(cx);
+        }
+        self.selected = Some(child);
+        cx.notify();
+    }
+
+    /// Shows what is inside the find `i`.
+    pub fn enter_find(&mut self, i: usize, cx: &mut Context<Self>) {
+        let Some(steps) = self.finds.get(i).and_then(|f| self.steps_to(&f.path)) else { return };
+        if !steps.is_empty() {
+            self.path = steps;
+            self.refocus(cx);
+        }
     }
 
     /// Shows the folder `child` of the one shown.
@@ -254,13 +320,24 @@ impl UsageView {
 
     pub fn select(&mut self, child: usize, cx: &mut Context<Self>) {
         self.selected = Some(child);
-        self.list.set_selected(vec![child as u32], cx);
-        self.list.scroll_to(child as u32, Align::Center, px(0.), cx);
+        let row = if self.dev {
+            let at = self.path_of(child).and_then(|p| Some(p.strip_prefix(&self.root).ok()?.to_path_buf()));
+            at.and_then(|at| self.finds.iter().position(|f| f.path == at))
+        } else {
+            Some(child)
+        };
+        match row {
+            Some(row) => {
+                self.list.set_selected(vec![row as u32], cx);
+                self.list.scroll_to(row as u32, Align::Center, px(0.), cx);
+            }
+            None => self.list.set_selected(Vec::new(), cx),
+        }
         cx.notify();
     }
 
     fn ask_trash(&mut self, path: PathBuf, cx: &mut Context<Self>) {
-        if self.pending.is_some() || !path.starts_with(self.folder_path()) {
+        if self.pending.is_some() || !path.starts_with(&self.root) || path == self.root {
             return;
         }
         let title = format!("Move \u{201c}{}\u{201d} to the Trash?", ops::name_of(&path));
@@ -273,7 +350,7 @@ impl UsageView {
         });
     }
 
-    /// Sends the shown folder's item at `path` to the Trash; it leaves the map once it is there.
+    /// Sends the item at `path`, under the root, to the Trash; it leaves the map once it is there.
     pub fn trash(&mut self, path: PathBuf, cx: &mut Context<Self>) {
         let origin = Origin { window: self.window, tab: None };
         let job = ops::submit(cx, origin, Op::Trash { paths: vec![path.clone()] });
@@ -306,32 +383,26 @@ impl UsageView {
 
     /// Takes the trashed item out of the tree and its size off every folder above it.
     fn forget(&mut self, path: &std::path::Path, cx: &mut Context<Self>) {
-        let Some(name) = path.file_name().map(|n| n.to_string_lossy().into_owned()) else { return };
-        if path.parent() != Some(self.folder_path().as_path()) {
+        let Ok(under) = path.strip_prefix(&self.root) else { return };
+        let names: Vec<String> = under.iter().map(|n| n.to_string_lossy().into_owned()).collect();
+        let shown = self.folder_path();
+        let Some(tree) = self.tree.as_mut() else { return };
+        if take(tree, &names).is_none() {
             return;
         }
-        let steps = self.path.clone();
-        let Some(mut node) = self.tree.as_mut() else { return };
-        for i in steps {
-            let Some(next) = node.children.get_mut(i) else { return };
-            node = next;
-        }
-        let Some(at) = node.children.iter().position(|c| c.name == name) else { return };
-        let gone = node.children.remove(at);
-        self.shrink(gone.size, gone.items + 1);
+        self.finds = Rc::new(trove_fs::dev_finds(tree));
+        // The indices moved; a shown folder that went with the item falls back to the nearest
+        // one still there.
+        let mut at = shown.strip_prefix(&self.root).unwrap_or(std::path::Path::new("")).to_path_buf();
+        self.path = loop {
+            match self.steps_to(&at) {
+                Some(steps) => break steps,
+                None if at.pop() => {}
+                None => break Vec::new(),
+            }
+        };
         self.refocus(cx);
-    }
-
-    fn shrink(&mut self, bytes: u64, items: u64) {
-        let Some(mut node) = self.tree.as_mut() else { return };
-        node.size = node.size.saturating_sub(bytes);
-        node.items = node.items.saturating_sub(items);
-        for i in self.path.clone() {
-            let Some(next) = node.children.get_mut(i) else { return };
-            next.size = next.size.saturating_sub(bytes);
-            next.items = next.items.saturating_sub(items);
-            node = next;
-        }
+        self.relist(cx);
     }
 
     fn show(&mut self, path: &std::path::Path, cx: &mut Context<Self>) {
@@ -362,13 +433,57 @@ impl UsageView {
     fn menu(&self, menu: ContextMenu, child: usize) -> ContextMenu {
         let Some(path) = self.path_of(child) else { return menu };
         let folder = self.folder().and_then(|f| f.children.get(child)).is_some_and(DuNode::is_dir);
+        Self::menu_for(menu, path, folder)
+    }
+
+    fn menu_for(menu: ContextMenu, path: PathBuf, folder: bool) -> ContextMenu {
         menu.item(if folder { "Open in Trove" } else { "Show in Trove" }, ShowInTrove(path.clone()))
             .item("Copy path", CopyPathOf(path.clone()))
             .separator()
             .item_destructive("Move to Trash", TrashMeasured(path))
     }
 
+    /// A row of the developer's view: what the folder is, where, and how much it holds.
+    fn find_row(&self, i: u32, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme();
+        let Some(find) = self.finds.get(i as usize) else { return div().into_any_element() };
+        let name = find.path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        let inside = find.path.parent().map(|p| p.display().to_string()).filter(|p| !p.is_empty());
+        let path = self.root.join(&find.path);
+        h_flex()
+            .id(SharedString::from(format!("usage-find-{i}")))
+            .h(px(ROW_H))
+            .px(theme.spacing.sm)
+            .gap(theme.spacing.sm)
+            .items_center()
+            .child(div().size(px(10.)).flex_none().rounded(theme.radius.sm).bg(tag_color(find.tag)))
+            .child(text(name).flex_none().truncate())
+            .child(div().flex_1().min_w_0().children(
+                inside.map(|p| text(p).text_size(theme.type_scale.footnote).text_color(theme.text.tertiary).truncate()),
+            ))
+            .child(
+                text(find.tag.label())
+                    .flex_none()
+                    .text_size(theme.type_scale.footnote)
+                    .text_color(theme.text.secondary),
+            )
+            .child(
+                div().w(px(64.)).flex_none().child(
+                    text(format::size(find.size))
+                        .text_size(theme.type_scale.footnote)
+                        .text_color(theme.text.secondary)
+                        .tabular_nums()
+                        .text_right(),
+                ),
+            )
+            .context_menu(move |menu, _, _| Self::menu_for(menu, path.clone(), true))
+            .into_any_element()
+    }
+
     fn row(&mut self, i: u32, _window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        if self.dev {
+            return self.find_row(i, cx);
+        }
         let theme = cx.theme();
         let Some(folder) = self.folder() else { return div().into_any_element() };
         let Some(node) = folder.children.get(i as usize) else { return div().into_any_element() };
@@ -489,7 +604,8 @@ impl UsageView {
         let theme = cx.theme();
         let (w, h) = self.area;
         if self.map_of != (self.generation, w, h) {
-            self.map = Rc::new(self.folder().map(|f| treemap::build(f, &self.legend, w, h)).unwrap_or_default());
+            let by = if self.dev { Colouring::Developer } else { Colouring::Extensions(&self.legend) };
+            self.map = Rc::new(self.folder().map(|f| treemap::build(f, by, w, h)).unwrap_or_default());
             self.map_of = (self.generation, w, h);
         }
         let fills = self.map.clone();
@@ -501,6 +617,7 @@ impl UsageView {
                     Paint::Frame { odd: false } => frame,
                     Paint::Frame { odd: true } => frame_odd,
                     Paint::Folder => closed,
+                    Paint::Tag(tag) => tag_color(tag),
                 };
                 let at = Bounds::new(point(px(f.rect.x), px(f.rect.y)), size(px(f.rect.w), px(f.rect.h)));
                 paint.fill_rect(at, color);
@@ -585,12 +702,12 @@ impl UsageView {
 
     fn legend(&self, cx: &mut Context<Self>) -> Div {
         let theme = cx.theme();
-        let key = |slot: usize, label: String, bytes: Option<u64>| {
+        let key = |color: Hsla, label: String, bytes: Option<u64>| {
             h_flex()
                 .gap(theme.spacing.xs)
                 .items_center()
                 .flex_none()
-                .child(div().size(px(10.)).rounded(theme.radius.sm).bg(slot_color(slot as u8)))
+                .child(div().size(px(10.)).rounded(theme.radius.sm).bg(color))
                 .child(text(label).text_size(theme.type_scale.caption).text_color(theme.text.primary))
                 .children(bytes.map(|b| {
                     text(format::size(b))
@@ -599,18 +716,39 @@ impl UsageView {
                         .tabular_nums()
                 }))
         };
-        let mut keys: Vec<Div> = self
-            .legend
-            .entries()
-            .iter()
-            .enumerate()
-            .map(|(slot, (ext, bytes))| {
-                let label = if ext.is_empty() { "no extension".to_owned() } else { format!(".{ext}") };
-                key(slot, label, Some(*bytes))
-            })
-            .collect();
+        let mut keys: Vec<Div> = if self.dev {
+            DevTag::ALL
+                .into_iter()
+                .filter_map(|tag| {
+                    let bytes: u64 = self.finds.iter().filter(|f| f.tag == tag).map(|f| f.size).sum();
+                    (bytes > 0).then(|| key(tag_color(tag), tag.label().to_owned(), Some(bytes)))
+                })
+                .collect()
+        } else {
+            self.legend
+                .entries()
+                .iter()
+                .enumerate()
+                .map(|(slot, (ext, bytes))| {
+                    let label = if ext.is_empty() { "no extension".to_owned() } else { format!(".{ext}") };
+                    key(slot_color(slot as u8), label, Some(*bytes))
+                })
+                .collect()
+        };
         if self.tree.is_some() {
-            keys.push(key(SLOTS, "Other".to_owned(), None));
+            let other = if self.dev { "Everything else" } else { "Other" };
+            keys.push(key(slot_color(SLOTS as u8), other.to_owned(), None));
+        }
+        if self.dev && self.tree.is_some() {
+            keys.push(
+                div().flex_none().child(
+                    text(format!("{} can be rebuilt", format::size(crate::du_cli::reclaimable(&self.finds))))
+                        .id("usage-reclaimable")
+                        .text_size(theme.type_scale.caption)
+                        .text_color(theme.text.secondary)
+                        .tabular_nums(),
+                ),
+            );
         }
         let line = match &self.error {
             Some(error) => text(error.clone()).text_color(theme.text.danger),
@@ -646,6 +784,22 @@ impl UsageView {
             Scan::Done if self.folder().is_none_or(|f| f.children.is_empty()) => {
                 status_page("Nothing in here").id("usage-empty").icon(Icon::Folder).compact().into_any_element()
             }
+            Scan::Done if self.dev && self.finds.is_empty() => {
+                let map = self.map(cx);
+                let theme = cx.theme();
+                let map = div().flex_1().min_w_0().h_full().p(theme.spacing.sm).child(map);
+                let none = status_page("Nothing to rebuild")
+                    .id("usage-no-finds")
+                    .icon(Icon::Code)
+                    .description("No worktrees, build output, dependencies or caches in here.")
+                    .compact();
+                h_flex()
+                    .size_full()
+                    .child(div().w(px(LIST_W)).h_full().flex_none().child(none))
+                    .child(div().w(px(1.)).h_full().flex_none().bg(theme.separator))
+                    .child(map)
+                    .into_any_element()
+            }
             Scan::Done => {
                 let (select, enter) = (cx.weak_entity(), cx.weak_entity());
                 let rows = list("usage-list", &self.list, cx.processor(Self::row))
@@ -653,12 +807,22 @@ impl UsageView {
                     .estimated_row_height(px(ROW_H))
                     .on_select(move |e: &SelectEvent<u32>, _, cx| {
                         let _ = select.update(cx, |this, cx| {
-                            this.selected = Some(e.key as usize);
-                            cx.notify();
+                            if this.dev {
+                                this.reveal(e.key as usize, cx);
+                            } else {
+                                this.selected = Some(e.key as usize);
+                                cx.notify();
+                            }
                         });
                     })
                     .on_activate(move |e: &ActivateEvent<u32>, _, cx| {
-                        let _ = enter.update(cx, |this, cx| this.enter(e.key as usize, cx));
+                        let _ = enter.update(cx, |this, cx| {
+                            if this.dev {
+                                this.enter_find(e.key as usize, cx);
+                            } else {
+                                this.enter(e.key as usize, cx);
+                            }
+                        });
                     });
                 h_flex()
                     .size_full()
@@ -669,6 +833,22 @@ impl UsageView {
             }
         }
     }
+}
+
+/// Removes the item at `names` under `node`, taking its size and count off every folder on the
+/// way; what it held, itself counted.
+fn take(node: &mut DuNode, names: &[String]) -> Option<(u64, u64)> {
+    let (first, rest) = names.split_first()?;
+    let at = node.children.iter().position(|c| c.name == *first)?;
+    let gone = if rest.is_empty() {
+        let gone = node.children.remove(at);
+        (gone.size, gone.items + 1)
+    } else {
+        take(node.children.get_mut(at)?, rest)?
+    };
+    node.size = node.size.saturating_sub(gone.0);
+    node.items = node.items.saturating_sub(gone.1);
+    Some(gone)
 }
 
 impl Drop for UsageView {
@@ -688,6 +868,13 @@ impl Render for UsageView {
                     .disabled(up == 0)
                     .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.go_to(up.saturating_sub(1), cx))),
             )
+            .item(segmented("usage-view", VIEWS).selected(usize::from(self.dev)).on_change(cx.listener(
+                |this, e: &SelectChanged, _, cx| {
+                    let on = e.index == 1;
+                    crate::settings::set(cx, "usage_developer", &on);
+                    this.set_developer(on, cx);
+                },
+            )))
             .item(
                 icon_button("usage-rescan", Icon::RotateCw)
                     .tooltip("Measure again")

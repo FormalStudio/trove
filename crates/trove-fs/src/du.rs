@@ -23,6 +23,99 @@ pub enum NodeKind {
     Rest,
 }
 
+/// What a developer can delete and get back by building, installing or checking out again.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum DevTag {
+    /// A linked git worktree: a folder whose `.git` is a file pointing into another checkout.
+    Worktree,
+    /// Build output: cargo's `target`, a CMake build tree, `.next`, `DerivedData`.
+    Build,
+    /// Installed dependencies: `node_modules`, a Python virtual environment.
+    Deps,
+    /// A download or tool cache: `~/.cache`, cargo's registry, anything with a `CACHEDIR.TAG`.
+    Cache,
+}
+
+impl DevTag {
+    pub const ALL: [DevTag; 4] = [DevTag::Worktree, DevTag::Build, DevTag::Deps, DevTag::Cache];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            DevTag::Worktree => "Worktree",
+            DevTag::Build => "Build output",
+            DevTag::Deps => "Dependencies",
+            DevTag::Cache => "Cache",
+        }
+    }
+
+    /// The word the command line and its JSON use.
+    pub fn id(self) -> &'static str {
+        match self {
+            DevTag::Worktree => "worktree",
+            DevTag::Build => "build",
+            DevTag::Deps => "deps",
+            DevTag::Cache => "cache",
+        }
+    }
+}
+
+/// What a folder holds that names it, noticed while it is read.
+#[derive(Clone, Copy, Debug, Default)]
+struct Marks {
+    cachedir_tag: bool,
+    rustc_info: bool,
+    cmake_cache: bool,
+    pyvenv: bool,
+    linked_git: bool,
+}
+
+const BUILD_NAMES: &[&str] = &[
+    ".next",
+    ".nuxt",
+    ".turbo",
+    ".svelte-kit",
+    ".parcel-cache",
+    ".angular",
+    ".gradle",
+    ".build",
+    "DerivedData",
+    "__pycache__",
+    "zig-cache",
+    ".zig-cache",
+    "dist-newstyle",
+];
+
+const CACHE_NAMES: &[&str] =
+    &[".cache", ".npm", ".ccache", ".mypy_cache", ".pytest_cache", ".ruff_cache", ".direnv", ".nx", ".pnpm-store"];
+
+fn dev_tag(name: &str, parent: &str, marks: Marks) -> Option<DevTag> {
+    if marks.linked_git {
+        return Some(DevTag::Worktree);
+    }
+    if name == "target" && (marks.cachedir_tag || marks.rustc_info) || marks.cmake_cache || BUILD_NAMES.contains(&name)
+    {
+        return Some(DevTag::Build);
+    }
+    if name == "node_modules" || name == "Pods" || marks.pyvenv {
+        return Some(DevTag::Deps);
+    }
+    let known = CACHE_NAMES.contains(&name)
+        || parent == ".cargo" && matches!(name, "registry" | "git")
+        || parent == ".rustup" && name == "toolchains"
+        || parent == ".bun" && name == "install";
+    (known || marks.cachedir_tag).then_some(DevTag::Cache)
+}
+
+/// Whether the `.git` file at `path` belongs to a linked worktree. A submodule's also points
+/// away, into `.git/modules`, and is part of its checkout.
+fn is_linked_worktree(path: &Path) -> bool {
+    use std::io::Read;
+    let mut head = [0u8; 512];
+    let Ok(n) = fs::File::open(path).and_then(|mut f| f.read(&mut head)) else { return false };
+    let text = String::from_utf8_lossy(&head[..n]);
+    text.starts_with("gitdir:") && text.contains("/worktrees/")
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Node {
     pub name: String,
@@ -31,6 +124,8 @@ pub struct Node {
     /// Files and folders under it; a file is 0, a [`NodeKind::Rest`] the files it stands for.
     pub items: u64,
     pub kind: NodeKind,
+    /// Set on a folder a developer can rebuild or fetch again.
+    pub tag: Option<DevTag>,
     /// Largest first.
     pub children: Vec<Node>,
 }
@@ -71,6 +166,11 @@ pub fn scan(root: PathBuf, stop: Arc<AtomicBool>) -> flume::Receiver<DuEvent> {
     rx
 }
 
+/// The same walk, waited for: what a command line wants. `None` when `root` cannot be read.
+pub fn walk_blocking(root: &Path) -> Option<Node> {
+    walk(root, &AtomicBool::new(false), |_| {})
+}
+
 /// One folder as its worker read it: its own files, and where it hangs in the tree.
 struct DirRec {
     id: u32,
@@ -82,6 +182,7 @@ struct DirRec {
     items: u64,
     files: Vec<(String, u64)>,
     rest: (u64, u64),
+    tag: Option<DevTag>,
 }
 
 struct Queue {
@@ -220,7 +321,8 @@ fn work(shared: &Shared, stop: &AtomicBool, tx: &flume::Sender<DirRec>) {
 
 fn read_dir(shared: &Shared, id: u32, parent: u32, path: &Path) -> (DirRec, Vec<(u32, u32, PathBuf)>) {
     let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-    let mut rec = DirRec { id, parent, name, size: 0, items: 0, files: Vec::new(), rest: (0, 0) };
+    let mut rec = DirRec { id, parent, name, size: 0, items: 0, files: Vec::new(), rest: (0, 0), tag: None };
+    let mut marks = Marks::default();
     let mut found = Vec::new();
     let Ok(entries) = fs::read_dir(path) else { return (rec, found) };
     for entry in entries.filter_map(Result::ok) {
@@ -241,9 +343,20 @@ fn read_dir(shared: &Shared, id: u32, parent: u32, path: &Path) -> (DirRec, Vec<
                 continue;
             }
             rec.size += size;
-            rec.files.push((entry.file_name().to_string_lossy().into_owned(), size));
+            let file = entry.file_name().to_string_lossy().into_owned();
+            match file.as_str() {
+                "CACHEDIR.TAG" => marks.cachedir_tag = true,
+                ".rustc_info.json" => marks.rustc_info = true,
+                "CMakeCache.txt" => marks.cmake_cache = true,
+                "pyvenv.cfg" => marks.pyvenv = true,
+                ".git" if md.is_file() => marks.linked_git = is_linked_worktree(&entry.path()),
+                _ => {}
+            }
+            rec.files.push((file, size));
         }
     }
+    let above = path.parent().and_then(Path::file_name).map(|n| n.to_string_lossy()).unwrap_or_default();
+    rec.tag = dev_tag(&rec.name, &above, marks);
     shared.items.fetch_add(rec.items, Relaxed);
     shared.bytes.fetch_add(rec.size, Relaxed);
     if rec.files.len() > NAMED_FILES {
@@ -256,7 +369,7 @@ fn read_dir(shared: &Shared, id: u32, parent: u32, path: &Path) -> (DirRec, Vec<
 
 fn file_node(name: String, size: u64) -> Node {
     let kind = NodeKind::File(FileKind::from_name(&name));
-    Node { name, size, items: 0, kind, children: Vec::new() }
+    Node { name, size, items: 0, kind, tag: None, children: Vec::new() }
 }
 
 /// A folder's id is always above its parent's, so going down the ids every folder is whole
@@ -280,17 +393,45 @@ fn assemble(recs: Vec<Option<DirRec>>) -> Option<Node> {
                 size: rec.rest.1,
                 items: rec.rest.0,
                 kind: NodeKind::Rest,
+                tag: None,
                 children: Vec::new(),
             });
         }
         children.sort_by(|a, b| b.size.cmp(&a.size).then_with(|| a.name.cmp(&b.name)));
-        let node = Node { name: rec.name, size, items, kind: NodeKind::Dir, children };
+        let node = Node { name: rec.name, size, items, kind: NodeKind::Dir, tag: rec.tag, children };
         match kids.get_mut(rec.parent as usize) {
             Some(siblings) => siblings.push(node),
             None => return Some(node),
         }
     }
     None
+}
+
+/// A tagged folder, by its path under the root of the walk.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Found {
+    pub path: PathBuf,
+    pub tag: DevTag,
+    pub size: u64,
+    pub items: u64,
+}
+
+/// Every tagged folder in `tree`, largest first. A worktree is looked into, so its own build
+/// output is listed beside it; the others are whole.
+pub fn dev_finds(tree: &Node) -> Vec<Found> {
+    let mut found = Vec::new();
+    let mut todo = vec![(PathBuf::new(), tree)];
+    while let Some((path, node)) = todo.pop() {
+        if let Some(tag) = node.tag {
+            found.push(Found { path: path.clone(), tag, size: node.size, items: node.items });
+            if tag != DevTag::Worktree {
+                continue;
+            }
+        }
+        todo.extend(node.children.iter().filter(|c| c.is_dir()).map(|c| (path.join(&c.name), c)));
+    }
+    found.sort_by(|a, b| b.size.cmp(&a.size).then_with(|| a.path.cmp(&b.path)));
+    found
 }
 
 #[cfg(test)]
@@ -353,6 +494,58 @@ mod tests {
         let t = tree(d);
         assert!(t.size >= 200_000 && t.size < 300_000, "{}", t.size);
         assert!(!child(&t, "alias").is_dir());
+    }
+
+    #[test]
+    fn worktrees_build_output_dependencies_and_caches_are_tagged() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let d = dir.path();
+        for sub in [
+            "repo/.git/worktrees/fix",
+            "repo/target/debug",
+            "repo/web/node_modules/left-pad",
+            "repo-wt/fix/target/debug",
+            "repo/sub",
+            "home/.cargo/registry/cache",
+            "home/.venv/lib",
+            "home/target",
+            "home/tagged",
+        ] {
+            fs::create_dir_all(d.join(sub)).expect("mkdir");
+        }
+        let write = |rel: &str, bytes: usize| fs::write(d.join(rel), vec![1u8; bytes]).expect("write");
+        write("repo/target/CACHEDIR.TAG", 40);
+        write("repo/target/debug/app", 500_000);
+        write("repo/web/node_modules/left-pad/index.js", 60_000);
+        fs::write(d.join("repo-wt/fix/.git"), "gitdir: /x/repo/.git/worktrees/fix\n").expect("write");
+        write("repo-wt/fix/target/.rustc_info.json", 40);
+        write("repo-wt/fix/target/debug/app", 300_000);
+        fs::write(d.join("repo/sub/.git"), "gitdir: ../.git/modules/sub\n").expect("write");
+        write("home/.cargo/registry/cache/crate.tar", 90_000);
+        write("home/.venv/pyvenv.cfg", 40);
+        write("home/target/notes.txt", 40);
+        write("home/tagged/CACHEDIR.TAG", 40);
+        let t = tree(d);
+        let mut finds: Vec<(String, DevTag)> =
+            dev_finds(&t).into_iter().map(|f| (f.path.to_string_lossy().into_owned(), f.tag)).collect();
+        assert_eq!(finds[0], ("repo/target".to_owned(), DevTag::Build));
+        assert_eq!(finds[1], ("repo-wt/fix".to_owned(), DevTag::Worktree));
+        assert_eq!(finds[2], ("repo-wt/fix/target".to_owned(), DevTag::Build));
+        finds.sort();
+        assert_eq!(
+            finds,
+            [
+                ("home/.cargo/registry".to_owned(), DevTag::Cache),
+                ("home/.venv".to_owned(), DevTag::Deps),
+                ("home/tagged".to_owned(), DevTag::Cache),
+                ("repo-wt/fix".to_owned(), DevTag::Worktree),
+                ("repo-wt/fix/target".to_owned(), DevTag::Build),
+                ("repo/target".to_owned(), DevTag::Build),
+                ("repo/web/node_modules".to_owned(), DevTag::Deps),
+            ]
+        );
+        assert_eq!(child(child(&t, "home"), "target").tag, None);
+        assert_eq!(child(child(&t, "repo"), "sub").tag, None);
     }
 
     #[test]

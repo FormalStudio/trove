@@ -1,6 +1,6 @@
 //! Tier 3: the Disk Usage window on a real tree, in a private headless Hyprland. It measures
 //! this checkout (sources, and build output when there is some), then goes into the largest
-//! folder and back out. Screenshots land in `artifacts/shots/usage/` for review.
+//! folder and back out, and opens once more on the developer's view. Screenshots land in `artifacts/shots/usage/` for review.
 //!
 //! It opens real windows, so it runs only under nextest or with `ND_REAL=1`.
 #![cfg(target_os = "linux")]
@@ -64,6 +64,24 @@ fn real_usage_measures_enters_and_leaves() {
 
         app.get_by_test_id("usage-up").click().unwrap();
         expect(&app.get_by_test_id("usage-crumb-1")).to_have_count(0).unwrap();
+        drop(app);
+
+        // The developer's view: this checkout's build output is the first thing it lists.
+        let mut options = LaunchOptions::new(bin())
+            .arg("--usage")
+            .arg(&target)
+            .arg("--dev")
+            .env("ND_THEME_TOML", toml.display().to_string());
+        for (key, value) in &env {
+            options = options.env(*key, value.clone());
+        }
+        let app = launch_app(options).unwrap();
+        expect(&app.get_by_test_id("usage-find-0")).to_be_visible().unwrap();
+        expect(&app.get_by_test_id("usage-reclaimable")).to_be_visible().unwrap();
+        std::thread::sleep(Duration::from_millis(700));
+        let out = shots.join(format!("developer-{scheme}.png"));
+        assert!(compositor.command("grim").arg("-l").arg("9").arg(&out).status().unwrap().success(), "grim failed");
+        println!("screenshot {}", out.display());
         drop(app);
     }
 }

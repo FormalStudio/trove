@@ -7,6 +7,7 @@ pub mod batch_rename;
 mod columns;
 mod conflict;
 mod demo;
+pub mod du_cli;
 mod env;
 mod extras;
 pub mod file_manager;
@@ -312,13 +313,20 @@ pub fn run() -> nd::Result<()> {
             }
             return Ok(());
         }
+        Some("du") => std::process::exit(du_cli::run(std::env::args_os().skip(2).collect())),
         Some("--usage") => {
             trace::init();
             pump::set_live();
-            let root = std::env::args_os().nth(2).map_or_else(|| env::get().home.clone(), arg_path);
+            let mut args: Vec<_> = std::env::args_os().skip(2).collect();
+            let dev = args.iter().any(|a| a == "--dev");
+            args.retain(|a| a != "--dev");
+            let root = args.into_iter().next().map_or_else(|| env::get().home.clone(), arg_path);
             let root = std::path::absolute(&root).unwrap_or(root);
             return app().run(move |cx| {
-                usage::open(cx, root.clone());
+                let window = usage::open(cx, root.clone());
+                if dev {
+                    window.root().clone().update(cx, |v, cx| v.set_developer(true, cx));
+                }
             });
         }
         Some("--file-manager") => {

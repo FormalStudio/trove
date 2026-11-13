@@ -3,6 +3,8 @@
 
 use nd::prelude::*;
 
+use trove_fs::DevTag;
+
 use crate::treemap::SLOTS;
 
 /// Mid tones, so each reads against the light and the dark surface alike. The last is the one
@@ -11,6 +13,17 @@ const MAP: [u32; SLOTS + 1] = [0x4c9be8, 0xe0a13a, 0x4fb37a, 0xb07ae6, 0xd9744a,
 
 pub fn slot_color(slot: u8) -> Hsla {
     rgb(MAP[usize::from(slot).min(SLOTS)]).into()
+}
+
+/// The developer's view borrows four of the same colours.
+pub fn tag_color(tag: DevTag) -> Hsla {
+    let slot = match tag {
+        DevTag::Worktree => 0,
+        DevTag::Build => 4,
+        DevTag::Deps => 3,
+        DevTag::Cache => 5,
+    };
+    slot_color(slot)
 }
 
 /// Every colour above, for the appearance audit to let through.
