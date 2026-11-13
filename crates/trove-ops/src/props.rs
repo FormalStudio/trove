@@ -2,7 +2,6 @@
 //! and whether this process may change a file's permissions.
 
 use std::fs;
-use std::os::unix::fs::MetadataExt;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -45,17 +44,14 @@ pub fn usage(paths: &[PathBuf], stop: &AtomicBool) -> Usage {
     total
 }
 
-/// Whether chmod(2) on a file owned by `uid` can succeed for this process: it owns the file,
-/// or it is root.
+/// Whether this process can change the permissions of a file owned by `uid`.
 pub fn may_change_mode(uid: u32) -> bool {
-    // SAFETY: geteuid has no preconditions and cannot fail.
-    let me = unsafe { libc::geteuid() };
-    me == 0 || me == uid
+    crate::sys::may_change_mode(uid)
 }
 
 /// The owner's uid of `path`, links followed.
 pub fn owner_of(path: &std::path::Path) -> Option<u32> {
-    fs::metadata(path).ok().map(|m| m.uid())
+    fs::metadata(path).ok().map(|m| crate::sys::owner(&m))
 }
 
 #[cfg(test)]

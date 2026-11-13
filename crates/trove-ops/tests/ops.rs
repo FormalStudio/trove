@@ -1,6 +1,7 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::fs;
+#[cfg(unix)]
 use std::os::unix::fs::{MetadataExt, symlink};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -39,18 +40,32 @@ impl Done {
     }
 }
 
-fn rig_with(mounts: Option<Vec<PathBuf>>) -> Rig {
-    let data = tempfile::tempdir().unwrap();
-    let data_home = data.path().join("share");
-    fs::create_dir_all(&data_home).unwrap();
-    let uid = unsafe_uid();
-    let trash = TrashConfig { data_home: data_home.clone(), uid, mounts: Some(mounts.unwrap_or_default()) };
-    let (ops, rx) = Ops::with_config(Config { trash });
-    Rig { ops, rx, work: tempfile::tempdir().unwrap(), _data: data, data_home }
+/// A temporary folder under its real path, which is what the trash records (macOS reaches
+/// `/var/folders` through a link).
+fn tempdir() -> TempDir {
+    tempfile::tempdir_in(fs::canonicalize(std::env::temp_dir()).unwrap()).unwrap()
 }
 
-fn unsafe_uid() -> u32 {
-    fs::metadata("/proc/self").unwrap().uid()
+fn rig_with(mounts: Option<Vec<PathBuf>>) -> Rig {
+    let data = tempdir();
+    let data_home = data.path().join("share");
+    fs::create_dir_all(&data_home).unwrap();
+    let uid = uid_of(data.path());
+    let trash =
+        TrashConfig { data_home: data_home.clone(), uid, mounts: Some(mounts.unwrap_or_default()), native: false };
+    let (ops, rx) = Ops::with_config(Config { trash });
+    Rig { ops, rx, work: tempdir(), _data: data, data_home }
+}
+
+/// This process's uid, as the owner of a folder it just made.
+#[cfg(unix)]
+fn uid_of(fresh: &Path) -> u32 {
+    fs::metadata(fresh).unwrap().uid()
+}
+
+#[cfg(not(unix))]
+fn uid_of(_: &Path) -> u32 {
+    0
 }
 
 fn rig() -> Rig {
@@ -139,6 +154,7 @@ fn names(dir: &Path) -> Vec<String> {
     v
 }
 
+#[cfg(unix)]
 #[test]
 fn move_within_one_file_system_renames() {
     let r = rig();
@@ -151,6 +167,7 @@ fn move_within_one_file_system_renames() {
     assert_eq!(fs::metadata(dest.join("a.txt")).unwrap().ino(), before);
 }
 
+#[cfg(unix)]
 #[test]
 fn move_across_file_systems_copies_then_deletes() {
     let r = rig();
@@ -530,6 +547,7 @@ fn trashing_same_names_twice_does_not_overwrite() {
     assert_eq!(names(&r.data_home.join("Trash/info")), ["a 2.txt.trashinfo", "a.txt.trashinfo"]);
 }
 
+#[cfg(unix)]
 #[test]
 fn empty_trash_clears_home_and_volume_trashes() {
     let Ok(vol) = tempfile::tempdir_in("/dev/shm") else { return };
@@ -542,7 +560,7 @@ fn empty_trash_clears_home_and_volume_trashes() {
     fs::write(&on_vol, "v").unwrap();
     r.run(Op::Trash { paths: vec![on_home.clone()] }).created();
     r.run(Op::Trash { paths: vec![on_vol.clone()] }).created();
-    let uid = unsafe_uid();
+    let uid = uid_of(r._data.path());
     let vol_trash = vol.path().join(format!(".Trash-{uid}"));
     assert_eq!(names(&vol_trash.join("files")), ["v.txt"]);
     let info = read(&vol_trash.join("info/v.txt.trashinfo"));
@@ -556,6 +574,7 @@ fn empty_trash_clears_home_and_volume_trashes() {
     assert!(names(&r.data_home.join("Trash/files")).is_empty());
 }
 
+#[cfg(unix)]
 #[test]
 fn trash_on_a_volume_without_a_trash_dir_fails_honestly() {
     let Ok(vol) = tempfile::tempdir_in("/dev/shm") else { return };
@@ -573,6 +592,7 @@ fn trash_on_a_volume_without_a_trash_dir_fails_honestly() {
     assert!(f.exists());
 }
 
+#[cfg(unix)]
 fn make_tree(r: &Rig) {
     r.write("tree/a.txt", "alpha");
     r.write("tree/sub/b.txt", "beta");
@@ -580,6 +600,7 @@ fn make_tree(r: &Rig) {
     symlink("a.txt", r.p("tree/link")).unwrap();
 }
 
+#[cfg(unix)]
 #[test]
 fn zip_round_trip() {
     let r = rig();
@@ -619,6 +640,7 @@ fn zip_of_several_items_extracts_into_a_named_folder() {
     assert!(names(&out).iter().all(|n| !n.starts_with('.')));
 }
 
+#[cfg(unix)]
 #[test]
 fn zip_entries_never_write_through_the_archives_own_symlinks() {
     use std::io::Write;
@@ -674,6 +696,7 @@ fn extract_of_an_unknown_format_names_the_missing_tool() {
     assert!(names(&out).is_empty(), "no staging left behind");
 }
 
+#[cfg(unix)]
 #[test]
 fn delete_removes_trees() {
     let r = rig();
@@ -712,6 +735,7 @@ fn rename_many_stops_at_a_taken_name_and_undoes_what_it_did() {
     assert_eq!(names(r.work.path()), ["a.txt", "b.txt", "taken.txt"]);
 }
 
+#[cfg(unix)]
 #[test]
 fn set_permissions_and_undo() {
     use std::os::unix::fs::PermissionsExt;
@@ -727,4 +751,28 @@ fn set_permissions_and_undo() {
     assert_eq!((mode(&a), mode(&b)), (0o644, 0o600));
     r.redo().created();
     assert_eq!((mode(&a), mode(&b)), (0o755, 0o700));
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn the_macos_trash_records_where_items_came_from() {
+    let r = rig();
+    let trash = TrashConfig { native: true, mounts: Some(Vec::new()), ..TrashConfig::from_env() };
+    let (ops, rx) = Ops::with_config(Config { trash });
+    let r = Rig { ops, rx, ..r };
+    let a = r.write("dir with space/é a.txt", "old");
+    r.run(Op::Trash { paths: vec![a.clone()] }).created();
+    assert!(!a.exists());
+    assert_eq!(r.undo().created(), vec![a.clone()]);
+    assert_eq!(read(&a), "old");
+
+    r.redo().created();
+    r.write("dir with space/é a.txt", "new");
+    let kept = r.p("dir with space/é a 2.txt");
+    assert_eq!(r.undo().created(), vec![kept.clone()]);
+    assert_eq!((read(&a).as_str(), read(&kept).as_str()), ("new", "old"));
+
+    let stray = r.write("stray.txt", "s");
+    let e = r.run(Op::Restore { trashed: vec![stray] }).error();
+    assert_eq!(e, "\"stray.txt\" has no original location recorded");
 }

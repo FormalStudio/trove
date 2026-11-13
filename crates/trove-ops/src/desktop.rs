@@ -4,7 +4,6 @@
 use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::fs;
-use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
@@ -409,7 +408,7 @@ pub(crate) fn tokenize_exec(exec: &str) -> Result<Vec<String>, String> {
 }
 
 fn file_uri(p: &Path) -> String {
-    format!("file://{}", utf8_percent_encode(&String::from_utf8_lossy(p.as_os_str().as_bytes()), PATH_SET))
+    format!("file://{}", utf8_percent_encode(&String::from_utf8_lossy(p.as_os_str().as_encoded_bytes()), PATH_SET))
 }
 
 /// A command to spawn. `env` carries the file-derived values that the Exec line's shell script

@@ -1,13 +1,16 @@
+#[cfg(not(any(target_os = "macos", windows)))]
 use std::cell::RefCell;
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use tempfile::TempDir;
 
+#[cfg(not(any(target_os = "macos", windows)))]
+use super::launch::{launch_app, open_in, set_default_in};
 use super::*;
-use crate::desktop::{
-    Launch, expand_exec as expand_launches, in_terminal, set_default_text, terminal_in, tokenize_exec,
-};
+#[cfg(not(any(target_os = "macos", windows)))]
+use crate::desktop::Launch;
+use crate::desktop::{expand_exec as expand_launches, in_terminal, set_default_text, terminal_in, tokenize_exec};
 
 struct Fixture {
     root: TempDir,
@@ -291,6 +294,7 @@ fn set_default_edits_only_its_line() {
     );
 }
 
+#[cfg(not(any(target_os = "macos", windows)))]
 #[test]
 fn set_default_writes_the_user_file_and_wins() {
     let f = Fixture::new();
@@ -308,6 +312,7 @@ fn expand_exec(app: &AppInfo, files: &[PathBuf]) -> Result<Vec<Vec<String>>, Str
     Ok(expand_launches(app, files)?.into_iter().map(|l| l.argv).collect())
 }
 
+#[cfg(not(any(target_os = "macos", windows)))]
 fn record(log: &RefCell<Vec<Vec<String>>>) -> impl Fn(&Launch) -> Result<(), String> + '_ {
     move |launch| {
         log.borrow_mut().push(launch.argv.clone());
@@ -315,6 +320,7 @@ fn record(log: &RefCell<Vec<Vec<String>>>) -> impl Fn(&Launch) -> Result<(), Str
     }
 }
 
+#[cfg(not(any(target_os = "macos", windows)))]
 #[test]
 fn open_groups_files_by_app_and_falls_back_to_xdg_open() {
     let f = Fixture::new();
@@ -349,6 +355,7 @@ fn open_groups_files_by_app_and_falls_back_to_xdg_open() {
     assert_eq!(*log.borrow(), [vec!["xdg-open".to_owned(), s(&odd)]]);
 }
 
+#[cfg(not(any(target_os = "macos", windows)))]
 #[test]
 fn open_with_runs_terminal_apps_in_a_terminal() {
     let f = Fixture::new();
