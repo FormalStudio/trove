@@ -291,14 +291,9 @@ pub fn segments(location: &Location, volumes: &[Volume]) -> Vec<Segment> {
         return vec![Segment { label: "Recent".into(), location: Location::Recent, icon: Some(icons::recent()) }];
     };
     let env = crate::env::get();
-    let mount = volumes
-        .iter()
-        .filter(|v| v.mount_point != Path::new("/") && path.starts_with(&v.mount_point))
-        .max_by_key(|v| v.mount_point.components().count());
+    let mount = crate::location::volume_above(path, &env.home, volumes);
     let (base, label, icon) = if path.starts_with(&env.trash) {
         (env.trash.clone(), "Trash".to_owned(), Icon::Trash)
-    } else if path.starts_with(&env.home) {
-        (env.home.clone(), "Home".to_owned(), Icon::House)
     } else if let Some(v) = mount {
         let label = if v.label.is_empty() {
             v.mount_point.file_name().map_or_else(|| "Volume".to_owned(), |n| n.to_string_lossy().into_owned())
@@ -306,6 +301,8 @@ pub fn segments(location: &Location, volumes: &[Volume]) -> Vec<Segment> {
             v.label.clone()
         };
         (v.mount_point.clone(), label, icons::for_volume(v.kind))
+    } else if path.starts_with(&env.home) {
+        (env.home.clone(), "Home".to_owned(), Icon::House)
     } else {
         (PathBuf::from("/"), "Computer".to_owned(), icons::for_volume(trove_fs::VolumeKind::Root))
     };

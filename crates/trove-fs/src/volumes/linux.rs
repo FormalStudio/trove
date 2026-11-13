@@ -126,6 +126,17 @@ pub(super) fn run_unmount(v: &Volume) -> Result<(), String> {
     run_tool("umount", &[mp])
 }
 
+/// Every mount point with the disk under it, `None` for one that is no disk's (tmpfs, proc,
+/// a network share). The subvolumes of one btrfs file system name the same device.
+pub(crate) fn disks() -> Vec<(PathBuf, Option<String>)> {
+    let text = std::fs::read_to_string(MOUNTINFO).unwrap_or_default();
+    disks_in(&parse_mountinfo(&text))
+}
+
+fn disks_in(mounts: &[MountInfo]) -> Vec<(PathBuf, Option<String>)> {
+    mounts.iter().map(|m| (m.mount_point.clone(), m.source.starts_with("/dev/").then(|| m.source.clone()))).collect()
+}
+
 pub(crate) fn parse_mountinfo(text: &str) -> Vec<MountInfo> {
     text.lines().filter_map(parse_mountinfo_line).collect()
 }

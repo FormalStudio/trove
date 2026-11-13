@@ -123,6 +123,11 @@ pub(crate) fn network_here(dir: &Path) -> (bool, HashSet<String>) {
     (remote, HashSet::new())
 }
 
+/// A drive is one device to a walk, so there is nothing to tell apart.
+pub(crate) fn disks() -> Vec<(PathBuf, Option<String>)> {
+    Vec::new()
+}
+
 pub(super) fn statvfs(path: &Path) -> Option<Usage> {
     let p = wide(path.as_os_str());
     let (mut free, mut total) = (0u64, 0u64);

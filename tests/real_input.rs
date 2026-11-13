@@ -275,7 +275,7 @@ fn real_middle_clicks_and_modifier_drags() {
     let mut rig = Rig::start();
     // The listing has the keys from launch, with nothing clicked yet.
     rig.key(key::DOWN, &[]);
-    rig.eventually("Down selects the first row", |r| r.status() == "\u{201c}Desktop\u{201d} selected");
+    rig.eventually("Down selects the first row", |r| r.status().starts_with("\u{201c}Desktop\u{201d} selected"));
 
     // Shift held over a second click selects the range between the two.
     let desktop = rig.row("Desktop");
@@ -284,7 +284,7 @@ fn real_middle_clicks_and_modifier_drags() {
     rig.input.hold(&[Modifier::Shift]).unwrap();
     rig.click(logs);
     rig.input.release().unwrap();
-    rig.eventually("Shift-click selects the range", |r| r.status() == "4 of 10 selected");
+    rig.eventually("Shift-click selects the range", |r| r.status().starts_with("4 of 10 selected"));
 
     // A middle click on a folder opens it in a tab behind this one; one on that tab closes it.
     assert!(!rig.tabs_shown(), "one tab shows no strip");
@@ -299,11 +299,32 @@ fn real_middle_clicks_and_modifier_drags() {
     rig.eventually("a middle click on the tab closes it", |r| !r.tabs_shown());
     // A press while the window still moves from two tabs to one starts no drag.
     settle(1000);
-    assert_eq!(rig.status(), "4 of 10 selected", "the first tab still shows Home with its selection");
+    assert!(rig.status().starts_with("4 of 10 selected"), "the first tab still shows Home with its selection");
 
     // Ctrl forces a copy where one file system would move; Shift forces the move.
     rig.drag_holding("todo.txt", "Projects", &[Modifier::Control]);
     rig.eventually("the Ctrl drop copies", |r| r.has_file("Projects/todo.txt") && r.has_file("todo.txt"));
     rig.drag_holding("Notes.md", "Projects", &[Modifier::Shift]);
     rig.eventually("the Shift drop moves", |r| r.has_file("Projects/Notes.md") && !r.has_file("Notes.md"));
+}
+
+/// A right click on a sidebar place opens its menu and leaves the folder shown alone.
+#[test]
+fn real_right_click_in_the_sidebar_opens_only_the_menu() {
+    if !real_allowed() {
+        println!("skipped: opens a real window; run with ND_REAL=1");
+        return;
+    }
+    let mut rig = Rig::start();
+    assert_eq!(rig.status(), "10 items");
+    let places = rig.app.get_by_test_id("places").bounding_box().unwrap().unwrap();
+    // Documents is the fourth place: 38 pt rows under the Favourites heading.
+    let documents = (rig.origin.0 + f64::from(places.x) + 70., rig.origin.1 + f64::from(places.y) + 170.);
+    rig.input.right_click(documents.0, documents.1).unwrap();
+    settle(600);
+    assert_eq!(rig.status(), "10 items", "the window still shows Home");
+    rig.key(key::ESC, &[]);
+    settle(300);
+    assert_eq!(rig.status(), "10 items", "and does once the menu is gone");
+    assert!(rig.app.get_by_text("todo.txt").count().unwrap_or(0) > 0);
 }

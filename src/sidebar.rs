@@ -74,6 +74,9 @@ impl Sidebar {
     pub fn set_current(&mut self, location: &Location, cx: &mut Context<Self>) {
         if self.current.as_ref() != Some(location) {
             self.current = Some(location.clone());
+            // A folder was just left or entered, so what the volumes had free may have moved on.
+            let mounts = self.volumes.iter().map(|v| v.mount_point.clone()).collect();
+            self.ask_usage(mounts, cx);
             cx.notify();
         }
     }
@@ -84,7 +87,13 @@ impl Sidebar {
             .filter(|v| !self.usage.contains_key(&v.mount_point))
             .map(|v| v.mount_point.clone())
             .collect();
-        for mount in unknown {
+        self.ask_usage(unknown, cx);
+        self.volumes = volumes;
+        cx.notify();
+    }
+
+    fn ask_usage(&mut self, mounts: Vec<PathBuf>, cx: &mut Context<Self>) {
+        for mount in mounts {
             let answer = crate::env::usage(mount.clone(), Duration::from_secs(2));
             if !crate::pump::live() {
                 if let Ok(Some(u)) = answer.try_recv() {
@@ -93,15 +102,14 @@ impl Sidebar {
                 continue;
             }
             pump(answer, cx.weak_entity(), move |this: &mut Sidebar, answers, cx| {
-                if let Some(u) = answers.into_iter().flatten().last() {
-                    this.usage.insert(mount.clone(), u);
+                if let Some(u) = answers.into_iter().flatten().last()
+                    && this.usage.insert(mount.clone(), u) != Some(u)
+                {
                     cx.notify();
                 }
                 false
             });
         }
-        self.volumes = volumes;
-        cx.notify();
     }
 
     fn id_for(&self, location: &Location) -> Option<SharedString> {

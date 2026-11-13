@@ -1,5 +1,5 @@
 //! What fills a folder: a walk of everything under it, added up into a tree of sizes. The walk
-//! stays on the root's file system, never follows a link, counts a hard-linked file once, and
+//! stays on the root's disk, never follows a link, counts a hard-linked file once, and
 //! measures the space a file takes on disk rather than its length.
 
 use std::collections::HashSet;
@@ -198,7 +198,56 @@ struct Shared {
     links: Mutex<HashSet<(u64, u64)>>,
     items: AtomicU64,
     bytes: AtomicU64,
+    disk: Disk,
+}
+
+/// What the walk stays on. A folder on another device is still this disk's when its mount is:
+/// a btrfs subvolume (`/home` beside `/`) or another volume of one APFS container has a device
+/// number of its own and shares the space.
+struct Disk {
     device: Option<u64>,
+    name: Option<String>,
+    mounts: Vec<(PathBuf, Option<String>)>,
+    /// The folders entered across a device boundary, so one mounted twice counts once.
+    entered: Mutex<HashSet<(u64, u64)>>,
+}
+
+impl Disk {
+    fn of(root: &Path, md: &Metadata) -> Self {
+        let mounts = crate::volumes::disks();
+        let name = disk_at(&mounts, &fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf()));
+        Self { device: device(md), name, mounts, entered: Mutex::new(HashSet::new()) }
+    }
+
+    fn holds(&self, path: &Path, md: &Metadata) -> bool {
+        if device(md) == self.device {
+            return true;
+        }
+        let same = self.name.is_some() && disk_at(&self.mounts, path) == self.name;
+        same && dir_id(md).is_none_or(|id| lock(&self.entered).insert(id))
+    }
+}
+
+/// The disk of the mount `path` is in: the deepest mount point above it, the last mounted there.
+fn disk_at(mounts: &[(PathBuf, Option<String>)], path: &Path) -> Option<String> {
+    let mut best: Option<&(PathBuf, Option<String>)> = None;
+    for mount in mounts.iter().filter(|(point, _)| path.starts_with(point)) {
+        if best.is_none_or(|b| mount.0.as_os_str().len() >= b.0.as_os_str().len()) {
+            best = Some(mount);
+        }
+    }
+    best.and_then(|(_, disk)| disk.clone())
+}
+
+#[cfg(unix)]
+fn dir_id(md: &Metadata) -> Option<(u64, u64)> {
+    use std::os::unix::fs::MetadataExt;
+    Some((md.dev(), md.ino()))
+}
+
+#[cfg(not(unix))]
+fn dir_id(_: &Metadata) -> Option<(u64, u64)> {
+    None
 }
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -252,7 +301,7 @@ fn walk(root: &Path, stop: &AtomicBool, mut report: impl FnMut(Progress)) -> Opt
         links: Mutex::new(HashSet::new()),
         items: AtomicU64::new(0),
         bytes: AtomicU64::new(on_disk(&md)),
-        device: device(&md),
+        disk: Disk::of(root, &md),
     };
     let workers = std::thread::available_parallelism().map_or(4, |n| n.get()).clamp(2, 8);
     let (tx, rx) = flume::unbounded::<DirRec>();
@@ -330,8 +379,8 @@ fn read_dir(shared: &Shared, id: u32, parent: u32, path: &Path) -> (DirRec, Vec<
         rec.items += 1;
         let size = on_disk(&md);
         if md.is_dir() {
-            // Another file system mounted here is not this one's space.
-            if device(&md) != shared.device {
+            // Another disk mounted here is not this one's space.
+            if !shared.disk.holds(&entry.path(), &md) {
                 continue;
             }
             rec.size += size;
@@ -444,6 +493,23 @@ mod tests {
 
     fn child<'a>(n: &'a Node, name: &str) -> &'a Node {
         n.children.iter().find(|c| c.name == name).expect("child")
+    }
+
+    #[test]
+    fn a_folder_is_on_the_disk_of_the_deepest_mount_above_it() {
+        let disk = |d: &str| Some(d.to_owned());
+        let mounts = vec![
+            (PathBuf::from("/"), disk("/dev/nvme0n1p5")),
+            (PathBuf::from("/home"), disk("/dev/nvme0n1p5")),
+            (PathBuf::from("/run"), None),
+            (PathBuf::from("/run/top"), disk("/dev/nvme0n1p5")),
+            (PathBuf::from("/mnt/overflow"), disk("/dev/loop0")),
+        ];
+        assert_eq!(disk_at(&mounts, Path::new("/home")), disk("/dev/nvme0n1p5"), "a subvolume of the root's disk");
+        assert_eq!(disk_at(&mounts, Path::new("/root/.cache/nested")), disk("/dev/nvme0n1p5"));
+        assert_eq!(disk_at(&mounts, Path::new("/run")), None, "tmpfs is no disk");
+        assert_eq!(disk_at(&mounts, Path::new("/mnt/overflow")), disk("/dev/loop0"), "another disk");
+        assert_eq!(disk_at(&mounts, Path::new("/homestead")), disk("/dev/nvme0n1p5"), "whole names only");
     }
 
     #[test]

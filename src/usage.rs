@@ -79,14 +79,16 @@ pub struct UsageView {
 
 /// Opens the window and starts measuring `root`.
 pub fn open(cx: &mut App, root: PathBuf) -> WindowHandle<UsageView> {
-    crate::init(cx);
-    let options = WindowOptions::main("usage")
-        .title(format!("Disk Usage of {}", title_of(&root)))
-        .size(size(px(1040.), px(680.)))
-        .min_size(size(px(680.), px(420.)));
-    cx.open_window(options, move |window, cx| {
-        let id = window.id();
-        cx.new(|cx| UsageView::new(root, id, cx))
+    crate::trace::timed("usage open", || {
+        crate::init(cx);
+        let options = WindowOptions::main("usage")
+            .title(format!("Disk Usage of {}", title_of(&root)))
+            .size(size(px(1040.), px(680.)))
+            .min_size(size(px(680.), px(420.)));
+        cx.open_window(options, move |window, cx| {
+            let id = window.id();
+            cx.new(|cx| UsageView::new(root, id, cx))
+        })
     })
 }
 
@@ -148,18 +150,40 @@ impl UsageView {
             match event {
                 DuEvent::Progress(p) => self.scan = Scan::Running(p),
                 DuEvent::Done(tree) => {
-                    self.legend = Rc::new(Legend::of(&tree));
-                    self.finds = Rc::new(trove_fs::dev_finds(&tree));
-                    self.tree = Some(Arc::unwrap_or_clone(tree));
-                    self.scan = Scan::Done;
-                    self.path.clear();
-                    self.refocus(cx);
-                    self.relist(cx);
+                    // The legend and the finds read the whole tree, so they are worked out off
+                    // the window's thread; a test has no host to run them on.
+                    let digest = move || {
+                        let (legend, finds) = (Legend::of(&tree), trove_fs::dev_finds(&tree));
+                        (Arc::unwrap_or_clone(tree), legend, finds)
+                    };
+                    if crate::pump::live() {
+                        let walk = self.stop.clone();
+                        ops::background(cx.weak_entity(), digest, move |this: &mut Self, (tree, legend, finds), cx| {
+                            if Arc::ptr_eq(&this.stop, &walk) {
+                                this.show_tree(tree, legend, finds, cx);
+                            }
+                        });
+                    } else {
+                        let (tree, legend, finds) = digest();
+                        self.show_tree(tree, legend, finds, cx);
+                    }
                 }
                 DuEvent::Failed => self.scan = Scan::Failed,
             }
         }
         cx.notify();
+    }
+
+    fn show_tree(&mut self, tree: DuNode, legend: Legend, finds: Vec<DuFound>, cx: &mut Context<Self>) {
+        crate::trace::timed("usage tree", || {
+            self.legend = Rc::new(legend);
+            self.finds = Rc::new(finds);
+            self.tree = Some(tree);
+            self.scan = Scan::Done;
+            self.path.clear();
+            self.refocus(cx);
+            self.relist(cx);
+        });
     }
 
     /// Takes the walk's events as they come until it ends; for tests, which have no pump.
@@ -605,7 +629,9 @@ impl UsageView {
         let (w, h) = self.area;
         if self.map_of != (self.generation, w, h) {
             let by = if self.dev { Colouring::Developer } else { Colouring::Extensions(&self.legend) };
-            self.map = Rc::new(self.folder().map(|f| treemap::build(f, by, w, h)).unwrap_or_default());
+            self.map = Rc::new(crate::trace::timed("usage map", || {
+                self.folder().map(|f| treemap::build(f, by, w, h)).unwrap_or_default()
+            }));
             self.map_of = (self.generation, w, h);
         }
         let fills = self.map.clone();
@@ -771,11 +797,21 @@ impl UsageView {
         let theme = cx.theme();
         let name = title_of(&self.root);
         match &self.scan {
-            Scan::Running(p) => status_page(format!("Measuring {name}"))
-                .id("usage-measuring")
-                .icon(icons::for_volume(trove_fs::VolumeKind::Internal))
-                .description(format!("{} \u{b7} {}", format::items(p.items as usize), format::size(p.bytes)))
-                .into_any_element(),
+            Scan::Running(p) => {
+                let page = status_page(format!("Measuring {name}"))
+                    .id("usage-measuring")
+                    .icon(icons::for_volume(trove_fs::VolumeKind::Internal))
+                    .description(format!("{} \u{b7} {}", format::items(p.items as usize), format::size(p.bytes)))
+                    .compact();
+                v_flex()
+                    .size_full()
+                    .items_center()
+                    .justify_center()
+                    .gap(theme.spacing.md)
+                    .child(page)
+                    .child(progress(None).id("usage-walking").w(px(220.)))
+                    .into_any_element()
+            }
             Scan::Failed => status_page(format!("{name} can\u{2019}t be read"))
                 .id("usage-failed")
                 .icon(Icon::Folder)

@@ -85,6 +85,20 @@ fn build_volumes(mounts: &[Mount]) -> Vec<Volume> {
     out
 }
 
+/// Every mount point with the disk under it: the volumes of one APFS container share theirs.
+/// The volumes under `/System/Volumes` are left out, since the firmlinks already show what the
+/// Data volume holds at `/Users`, `/Applications` and the rest.
+pub(crate) fn disks() -> Vec<(PathBuf, Option<String>)> {
+    mounts()
+        .into_iter()
+        .map(|m| {
+            let hidden = m.point.starts_with("/System/Volumes");
+            let disk = whole_disk(&m.source).filter(|_| !hidden).map(str::to_owned);
+            (m.point, disk)
+        })
+        .collect()
+}
+
 pub fn volumes() -> Vec<Volume> {
     build_volumes(&mounts())
 }

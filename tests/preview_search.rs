@@ -340,6 +340,29 @@ fn results_preview_and_show_in_folder() {
 }
 
 #[test]
+fn every_column_keeps_the_tabs_order() {
+    use trove_fs::{SortKey, SortOrder};
+    let mut h = Harness::at(look());
+    h.act(ColumnsView);
+    let tab = h.tab();
+    let order = |h: &mut Harness, ascending: bool| {
+        let sort = SortOrder { key: SortKey::Name, ascending, folders_first: false };
+        tab.update(&mut h.cx, |t, cx| t.set_sort(sort, cx));
+        tab.read(&h.cx).column_view().names_in(home())
+    };
+    let up = order(&mut h, true);
+    let mut down = order(&mut h, false);
+    assert!(up.len() > 2, "{up:?}");
+    down.reverse();
+    assert_eq!(down, up, "the column of the folder above follows the tab's sort");
+
+    // A column listed after the sort changed takes it too.
+    h.select(&["sub"]);
+    let inside = h.tab().read(&h.cx).column_view().names_in(&look().join("sub"));
+    assert_eq!(inside, ["report-draft.md", "notes.md"]);
+}
+
+#[test]
 fn columns_view_walks_folders_left_and_right() {
     let mut h = Harness::at(look());
     h.act(ColumnsView);

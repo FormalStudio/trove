@@ -20,6 +20,7 @@ use macos as sys;
 #[cfg(windows)]
 use windows as sys;
 
+pub(crate) use sys::disks;
 pub(crate) use sys::network_here;
 pub use sys::volumes;
 

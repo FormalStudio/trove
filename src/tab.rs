@@ -795,6 +795,8 @@ impl Tab {
             self.resort();
             self.refresh(cx);
         });
+        let (show_hidden, sort) = (self.show_hidden(), self.sort());
+        self.extras.columns.set_sort(show_hidden, sort, cx);
     }
 
     /// Folders before files in a folder's sort, or mixed in. Recent keeps its date order.

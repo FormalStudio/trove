@@ -15,7 +15,7 @@ pub const HELP: &str = "\
 trove du [--dev] [--json] [--depth N] [--top N] [FOLDER]
 
 Measures FOLDER (default: the current one) and prints what fills it, largest first.
-Sizes are bytes on disk; other file systems mounted inside are left out.
+Sizes are bytes on disk; other disks mounted inside are left out.
 
   --dev      list worktrees, build output, dependencies and caches instead of the tree
   --json     print JSON: {path, bytes, items, children[], dev[], reclaimable_bytes}

@@ -598,3 +598,36 @@ fn perf_launch_trace() {
         run.stop();
     }
 }
+
+/// The Disk Usage window on a whole disk (`TROVE_USAGE_OF`, default `/`): what held the main
+/// thread once the walk ended, and the frames while it ran and after.
+#[test]
+#[ignore = "a benchmark"]
+fn perf_disk_usage() {
+    if !real_allowed() {
+        return;
+    }
+    let c = compositor();
+    let of = std::env::var("TROVE_USAGE_OF").unwrap_or_else(|_| "/".to_owned());
+    let run = Run::start(&c, &["--usage", &of], &[("ND_ANIMATE", "8")]);
+    let done = run.wait_line("usage tree took", Duration::from_secs(300)).expect("the walk ends");
+    println!("{}", done.1);
+    std::thread::sleep(Duration::from_secs(12));
+    for line in run.all("usage").into_iter().chain(run.all("nd-budget")) {
+        println!("{line}");
+    }
+    run.stop();
+
+    // From the main window: Ctrl+U on the folder shown, as the menu's Disk usage does.
+    let run = Run::start(&c, &[&of], &[("ND_ANIMATE", "10")]);
+    run.wait_line("] complete", Duration::from_secs(60)).unwrap();
+    std::thread::sleep(Duration::from_secs(1));
+    let mut input = VirtualInput::connect(&c).unwrap();
+    // KEY_U of linux/input-event-codes.h.
+    input.key(22, &[ndshell::wayland::Modifier::Control]).unwrap();
+    std::thread::sleep(Duration::from_secs(13));
+    for line in run.all("usage").into_iter().chain(run.all("nd-budget")) {
+        println!("from the main window: {line}");
+    }
+    run.stop();
+}

@@ -118,7 +118,7 @@ impl Columns {
     }
 
     /// Waits up to `timeout` for every column's listing: the host's pump, for tests.
-    pub fn drain(&mut self, show_hidden: bool, timeout: Duration, cx: &mut App) {
+    pub fn drain(&mut self, show_hidden: bool, sort: SortOrder, timeout: Duration, cx: &mut App) {
         for level in self.levels.iter_mut().chain(self.child.as_mut()) {
             // nd-allow(clock-in-ui): a test drain's deadline, run with no executor
             let deadline = std::time::Instant::now() + timeout;
@@ -131,8 +131,16 @@ impl Columns {
                 let Ok(first) = rx.recv_timeout(left) else { break };
                 let mut batch = vec![first];
                 batch.extend(rx.try_iter());
-                level.apply(batch, show_hidden, cx);
+                level.apply(batch, show_hidden, sort, cx);
             }
+        }
+    }
+
+    /// Orders every column as the tab's own: a folder keeps its place from one column to the
+    /// next as the tab moves through it.
+    pub fn set_sort(&mut self, show_hidden: bool, sort: SortOrder, cx: &mut App) {
+        for level in self.levels.iter_mut().chain(self.child.as_mut()) {
+            level.order(show_hidden, sort, cx);
         }
     }
 }
@@ -144,10 +152,10 @@ impl Level {
         let events = listing.events.clone();
         let at = dir.clone();
         pump(events.clone(), me, move |tab: &mut Tab, batch, cx| {
-            let show_hidden = tab.show_hidden();
+            let (show_hidden, sort) = (tab.show_hidden(), tab.sort());
             match tab.extras.columns.level_mut(&at) {
                 Some(level) => {
-                    level.apply(batch, show_hidden, cx);
+                    level.apply(batch, show_hidden, sort, cx);
                     cx.notify();
                     true
                 }
@@ -166,7 +174,7 @@ impl Level {
         }
     }
 
-    fn apply(&mut self, batch: Vec<ListEvent>, show_hidden: bool, cx: &mut App) {
+    fn apply(&mut self, batch: Vec<ListEvent>, show_hidden: bool, sort: SortOrder, cx: &mut App) {
         for event in batch {
             match event {
                 ListEvent::Entries(chunk) => {
@@ -210,7 +218,11 @@ impl Level {
                 ListEvent::Listed { .. } | ListEvent::Slow => {}
             }
         }
-        trove_fs::sort_entries(&mut self.entries, SortOrder::default());
+        self.order(show_hidden, sort, cx);
+    }
+
+    fn order(&mut self, show_hidden: bool, sort: SortOrder, cx: &mut App) {
+        trove_fs::sort_entries(&mut self.entries, sort);
         self.index = self.entries.iter().enumerate().map(|(i, e)| (e.id, i)).collect();
         let keys: Vec<EntryId> = self.entries.iter().filter(|e| show_hidden || !e.hidden).map(|e| e.id).collect();
         self.list.set_items(keys, cx);
@@ -239,9 +251,16 @@ fn id_of(name: &std::ffi::OsStr) -> EntryId {
     EntryId::of(name)
 }
 
-/// Where the columns start for `dir`: Home when it is inside Home, else the root.
+/// Where the columns start for `dir`: the volume it is on, Home when it is inside Home, else
+/// the root.
 fn origin(dir: &Path, home: &Path) -> PathBuf {
-    if dir.starts_with(home) { home.to_path_buf() } else { PathBuf::from("/") }
+    if let Some(v) = crate::location::volume_above(dir, home, &crate::env::volumes()) {
+        v.mount_point.clone()
+    } else if dir.starts_with(home) {
+        home.to_path_buf()
+    } else {
+        PathBuf::from("/")
+    }
 }
 
 /// Lines the columns up with the tab's folder and cursor: reuses the columns above it, lists
@@ -516,7 +535,8 @@ impl Tab {
     /// Waits for every column's listing, for tests.
     pub fn drain_columns(&mut self, timeout: Duration, cx: &mut Context<Self>) {
         let show_hidden = self.show_hidden();
-        self.extras.columns.drain(show_hidden, timeout, cx);
+        let sort = self.sort();
+        self.extras.columns.drain(show_hidden, sort, timeout, cx);
         cx.notify();
     }
 
