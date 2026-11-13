@@ -175,6 +175,7 @@ pub fn shortcuts(cx: &App) -> Vec<Group> {
                 ("Redo", &Redo),
                 ("New folder", &NewFolder),
                 ("Duplicate", &Duplicate),
+                ("Make link", &MakeLink),
                 ("Move to Trash", &Trash),
                 ("Delete permanently", &DeletePermanently),
                 ("Restore from Trash", &Restore),

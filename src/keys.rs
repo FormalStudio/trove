@@ -5,7 +5,7 @@ use std::path::Path;
 
 use nd::prelude::*;
 
-use crate::actions::{FILES, SEARCH, WINDOW};
+use crate::actions::{FILES, SEARCH, WINDOW, ZoomTo};
 use crate::location::Location;
 use crate::root::Root;
 use crate::tab::View;
@@ -76,6 +76,10 @@ pub fn on_root(root: Scaffold, cx: &mut Context<Root>) -> Scaffold {
     .on_action(cx.listener(|this, _: &ZoomIn, _, cx| zoom(this, |z, view| z.step(view, 1), cx)))
     .on_action(cx.listener(|this, _: &ZoomOut, _, cx| zoom(this, |z, view| z.step(view, -1), cx)))
     .on_action(cx.listener(|this, _: &ZoomReset, _, cx| zoom(this, Zoom::reset, cx)))
+    .on_action(cx.listener(|this, ZoomTo(at): &ZoomTo, _, cx| {
+        let at = *at;
+        zoom(this, move |z, view| z.at(view, at), cx);
+    }))
     .on_action(cx.listener(|this, _: &FocusResults, window, cx| {
         let tab = this.active_tab().clone();
         tab.update(cx, |t, cx| {

@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 
 use crate::Resolution;
 use crate::job::{At, Ctx, R, Stop, fail, name_of};
-use crate::names::{copy_name, exists, free_name, keep_both};
+use crate::names::{copy_name, exists, free_name, keep_both, link_name};
 use crate::sys::{self, ModeExt};
 
 pub(crate) const CHUNK: usize = 1 << 20;
@@ -566,6 +566,20 @@ pub(crate) fn create(ctx: &mut Ctx, parent: &Path, name: &str, folder: bool) -> 
             Err(e) => return Err(e).at(&path),
         }
     }
+}
+
+/// A symbolic link to each of `paths` in its own folder, pointing at it by its full path.
+pub(crate) fn make_links(ctx: &mut Ctx, paths: &[PathBuf]) -> R<()> {
+    for path in paths {
+        let (Some(dir), Some(name)) = (path.parent(), path.file_name()) else {
+            return fail(format!("{} has no folder to put a link in", path.display()));
+        };
+        let is_dir = is_real_dir(&meta(path)?);
+        let link = dir.join(link_name(dir, &name.to_string_lossy(), is_dir));
+        sys::symlink(path, &link).at(&link)?;
+        ctx.created.push(link);
+    }
+    Ok(())
 }
 
 /// Copies `template` into `parent` under a name nothing there has.

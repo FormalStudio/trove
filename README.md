@@ -56,6 +56,9 @@ minute, focused or behind another window.
   second and the window stays responsive.
 - Copy, move, rename, trash, restore, compress and extract run as queued jobs with progress,
   conflict handling and undo. Hold Ctrl while dragging to copy, Shift to move.
+  Make link in a file's menu puts a symbolic link beside it.
+- The status bar adds up the selected files and, once walked, the selected folders, and its
+  slider sets the size of the rows or tiles.
 - Interop with the rest of the desktop on Linux: the freedesktop Trash, the shared thumbnail
   cache, GTK bookmarks, `recently-used.xbel`, and the GNOME Files clipboard format. On macOS and
   Windows it uses the system Trash and keeps its bookmarks and thumbnails in its own folders;

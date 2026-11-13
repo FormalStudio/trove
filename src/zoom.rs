@@ -83,6 +83,22 @@ impl Zoom {
         }
     }
 
+    /// `view` at the step `at`, held at the largest.
+    pub fn at(self, view: View, at: usize) -> Self {
+        match view {
+            View::Grid => Self { grid: at.min(TILES.len() - 1), ..self },
+            View::List | View::Columns => Self { list: at.min(ROWS.len() - 1), ..self },
+        }
+    }
+
+    /// The step `view` is at, and its largest.
+    pub fn step_of(self, view: View) -> (usize, usize) {
+        match view {
+            View::Grid => (self.grid, TILES.len() - 1),
+            View::List | View::Columns => (self.list, ROWS.len() - 1),
+        }
+    }
+
     /// `view` back at its default size.
     pub fn reset(self, view: View) -> Self {
         let default = Self::default();

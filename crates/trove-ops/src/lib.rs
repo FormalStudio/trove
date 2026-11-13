@@ -69,6 +69,10 @@ pub enum Op {
     Duplicate {
         paths: Vec<PathBuf>,
     },
+    /// A symbolic link to each beside it: "name link.ext", "name link 2.ext".
+    MakeLink {
+        paths: Vec<PathBuf>,
+    },
     /// `dest` is the zip file to write, or an existing folder to write "<name>.zip" or
     /// "Archive.zip" into. A taken name gets " 2", " 3", ...
     Compress {

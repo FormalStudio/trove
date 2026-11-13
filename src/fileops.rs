@@ -73,6 +73,13 @@ pub fn register(root: Scaffold, cx: &mut Context<Root>) -> Scaffold {
                 ops::submit(cx, o, Op::Duplicate { paths });
             }
         }))
+        .on_action(cx.listener(|r, _: &MakeLink, _, cx| {
+            let paths = selection(r, cx);
+            if !paths.is_empty() && !in_trash(r, cx) {
+                let o = origin(r, cx);
+                ops::submit(cx, o, Op::MakeLink { paths });
+            }
+        }))
         .on_action(cx.listener(|r, _: &Compress, _, cx| compress(r, cx)))
         .on_action(cx.listener(|r, _: &ExtractHere, _, cx| {
             if let [archive] = selection(r, cx).as_slice()

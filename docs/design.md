@@ -134,6 +134,7 @@ pub enum Op {
     Restore { trashed: Vec<PathBuf> },            // paths inside Trash/files
     EmptyTrash,
     Duplicate { paths: Vec<PathBuf> },            // "name copy.ext", "name copy 2.ext"
+    MakeLink { paths: Vec<PathBuf> },             // a symlink beside each: "name link.ext"
     Compress { paths: Vec<PathBuf>, dest: PathBuf }, // dest: the .zip to write, or a folder to write into
     Extract { archive: PathBuf, dest_dir: PathBuf },
 }
@@ -351,7 +352,7 @@ index is over 5 minutes old a query also walks its scope 3 levels deep to catch 
 - Status bar: item count, selection count and size, free space, running jobs with progress and
   cancel. Conflicts open a sheet: Replace (Merge for two folders), Skip, Keep both, Apply to
   all, Cancel. A failure shows as a toast with the reason.
-- Context menus: on files (Open, Open with, Cut, Copy, Duplicate, Rename, Compress, Move to
+- Context menus: on files (Open, Open with, Cut, Copy, Duplicate, Make link, Rename, Compress, Move to
   Trash, and Restore in the Trash), on empty space (New folder, New file, Paste, Show hidden,
   Sort by, View), on the sidebar and on the tab strip. The Trash lists Original location and
   Date deleted from `.trashinfo`, under a banner with Empty Trash.

@@ -9,6 +9,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use nd::core::WindowId;
 use nd::prelude::*;
 
+use crate::actions::ZoomTo;
 use crate::format;
 use crate::ops::{self, JobRow};
 use crate::tab::{Load, Tab};
@@ -211,6 +212,15 @@ impl Render for StatusBar {
                 )
         });
         let dismiss = jobs.downgrade();
+        let size = self.tab.as_ref().map(|tab| {
+            let tab = tab.read(cx);
+            let (at, last) = tab.zoom().step_of(tab.view());
+            slider("status-zoom", at as f32).range(0. ..=last as f32).step(1.).label("Size").w(px(96.)).on_change(
+                |e: &SliderChanged, window, cx| {
+                    cx.dispatch_action(window.id(), &ZoomTo(e.value.round().max(0.) as usize));
+                },
+            )
+        });
         v_flex()
             .w_full()
             .child(separator())
@@ -224,7 +234,8 @@ impl Render for StatusBar {
                     .gap(theme.spacing.md)
                     .items_center()
                     .child(div().flex_1().min_w_0().child(line(left, "status-items".into()).truncate()))
-                    .child(line(right, "status-free".into())),
+                    .child(line(right, "status-free".into()))
+                    .children(size),
             )
             .child(toast_overlay("job-toasts").toasts(toasts).on_dismiss(move |e: &ToastDismissed, _, cx| {
                 let _ = dismiss.update(cx, |j, cx| j.dismiss_notice(&e.id, cx));

@@ -186,6 +186,9 @@ fn zoom_steps_each_view_and_is_remembered() {
     h.act(ZoomIn);
     h.act(ZoomIn);
     assert_eq!(h.tab().read(&h.cx).zoom().list, ROWS.len() - 1, "held at the largest");
+    h.act(trove::actions::ZoomTo(1));
+    assert_eq!(h.tab().read(&h.cx).zoom().row(), ROWS[1], "the status bar's slider sets a step outright");
+    h.act(trove::actions::ZoomTo(9));
     assert_eq!(usize::from(trove::settings::get(&h.cx).list_zoom), ROWS.len() - 1);
 
     h.act(GridView);

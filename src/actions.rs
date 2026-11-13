@@ -44,6 +44,7 @@ actions!(
         NewFolder,
         NewFile,
         Duplicate,
+        MakeLink,
         Compress,
         ExtractHere,
         CopyPath,
@@ -141,6 +142,11 @@ pub struct SelectTab(pub usize);
 #[derive(Clone, PartialEq, Debug, Action)]
 #[action(namespace = trove, no_json)]
 pub struct TypeSelect(pub char);
+
+/// The active view at this step of its sizes: the status bar's slider.
+#[derive(Clone, PartialEq, Debug, Action)]
+#[action(namespace = trove, no_json)]
+pub struct ZoomTo(pub usize);
 
 /// Go to a folder: the path bar's collapsed segments and its menu.
 #[derive(Clone, PartialEq, Debug, Action)]

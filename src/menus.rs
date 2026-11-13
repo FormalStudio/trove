@@ -52,7 +52,7 @@ pub fn files(menu: ContextMenu, t: &Target, cx: &mut App) -> ContextMenu {
     if one_folder {
         menu = menu.item("Paste into folder", PasteInto);
     }
-    menu = menu.item("Duplicate", Duplicate);
+    menu = menu.item("Duplicate", Duplicate).item("Make link", MakeLink);
     if t.paths.len() == 1 {
         menu = menu.item("Rename\u{2026}", Rename);
     } else if t.paths.len() > 1 {

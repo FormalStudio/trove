@@ -212,6 +212,21 @@ fn copy_into_the_same_folder_names_copies() {
 }
 
 #[test]
+fn a_link_lands_beside_what_it_points_at_and_undo_takes_it_away() {
+    let r = rig();
+    let a = r.write("a.txt", "one");
+    let made = r.run(Op::MakeLink { paths: vec![a.clone()] }).created();
+    assert_eq!(made, vec![r.p("a link.txt")]);
+    assert_eq!(fs::read_link(r.p("a link.txt")).unwrap(), a);
+    assert_eq!(read(&r.p("a link.txt")), "one");
+    let again = r.run(Op::MakeLink { paths: vec![a.clone()] }).created();
+    assert_eq!(again, vec![r.p("a link 2.txt")]);
+    r.undo();
+    assert!(fs::symlink_metadata(r.p("a link 2.txt")).is_err());
+    assert_eq!(read(&a), "one");
+}
+
+#[test]
 fn move_onto_itself_is_a_no_op() {
     let r = rig();
     let a = r.write("a.txt", "one");

@@ -46,6 +46,16 @@ pub(crate) fn copy_name(dir: &Path, name: &str, is_dir: bool) -> String {
     (2u32..).map(|n| format!("{base} copy {n}{ext}")).find(|c| !exists(&dir.join(c))).unwrap_or(first)
 }
 
+/// "name link.ext", "name link 2.ext", ... for a link beside what it points at.
+pub(crate) fn link_name(dir: &Path, name: &str, is_dir: bool) -> String {
+    let (stem, ext) = split_ext(name, is_dir);
+    let first = format!("{stem} link{ext}");
+    if !exists(&dir.join(&first)) {
+        return first;
+    }
+    (2u32..).map(|n| format!("{stem} link {n}{ext}")).find(|c| !exists(&dir.join(c))).unwrap_or(first)
+}
+
 fn strip_copy_suffix(stem: &str) -> &str {
     if let Some(base) = stem.strip_suffix(" copy") {
         return base;

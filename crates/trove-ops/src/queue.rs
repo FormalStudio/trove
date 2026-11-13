@@ -229,6 +229,7 @@ fn title_of(job: &Job, origin: Origin) -> String {
             Op::Restore { trashed } => format!("Restoring {}", count_label(trashed.len(), &first_name(trashed))),
             Op::EmptyTrash => "Emptying Trash".into(),
             Op::Duplicate { paths } => format!("Duplicating {}", count_label(paths.len(), &first_name(paths))),
+            Op::MakeLink { paths } => format!("Linking {}", count_label(paths.len(), &first_name(paths))),
             Op::Compress { paths, .. } => format!("Compressing {}", count_label(paths.len(), &first_name(paths))),
             Op::Extract { archive, .. } => format!("Extracting \"{}\"", name_of(archive)),
             Op::SetPermissions { modes } => {
@@ -260,6 +261,7 @@ fn execute(ctx: &mut Ctx, job: &Job) -> R<()> {
                     .collect();
                 fsops::transfer(ctx, Mode::Copy, &items)
             }
+            Op::MakeLink { paths } => fsops::make_links(ctx, paths),
             Op::Trash { paths } => trash::trash_paths(ctx, paths),
             Op::Delete { paths } => fsops::delete_paths(ctx, paths),
             Op::Rename { path, new_name } => fsops::rename(ctx, path, new_name),
@@ -294,6 +296,7 @@ fn inverse_of(job: &Job, ctx: &Ctx) -> Option<Job> {
                 .then(|| Job::Op(Op::SetPermissions { modes: ctx.modes.iter().rev().cloned().collect() })),
             Op::Copy { .. }
             | Op::Duplicate { .. }
+            | Op::MakeLink { .. }
             | Op::NewFolder { .. }
             | Op::NewFile { .. }
             | Op::NewFromTemplate { .. }

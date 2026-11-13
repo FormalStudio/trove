@@ -406,6 +406,7 @@ impl Jobs {
 fn verb(op: &Op) -> &'static str {
     match op {
         Op::Copy { .. } | Op::Duplicate { .. } => "Could not copy",
+        Op::MakeLink { .. } => "Could not make a link",
         Op::Move { .. } => "Could not move",
         Op::Trash { .. } => "Could not move to Trash",
         Op::Delete { .. } => "Could not delete",
