@@ -34,12 +34,12 @@ pub(super) fn all_trashes(cfg: &TrashConfig) -> Vec<PathBuf> {
         let shared = mp.join(".Trash");
         if usable_shared(&shared) {
             let t = shared.join(&uid);
-            if t.is_dir() {
+            if private_dir(&t, cfg.uid) {
                 out.push(t);
             }
         }
         let own = mp.join(format!(".Trash-{}", cfg.uid));
-        if own.is_dir() && !out.contains(&own) {
+        if private_dir(&own, cfg.uid) && !out.contains(&own) {
             out.push(own);
         }
     }
@@ -83,6 +83,12 @@ fn read_mountinfo() -> Vec<PathBuf> {
 /// `$topdir/.Trash` is only used when it is a real folder (not a symlink) with the sticky bit.
 fn usable_shared(dir: &Path) -> bool {
     fs::symlink_metadata(dir).is_ok_and(|m| m.file_type().is_dir() && sys::mode(&m) & 0o1000 != 0)
+}
+
+/// A volume's trash and its `files` and `info` count only as real folders we own: anyone who can
+/// write to the drive could plant a link there that would make emptying reach outside the trash.
+fn private_dir(dir: &Path, uid: u32) -> bool {
+    fs::symlink_metadata(dir).is_ok_and(|m| m.file_type().is_dir() && sys::owner(&m) == uid)
 }
 
 fn make_private_dir(path: &Path) -> io::Result<()> {
@@ -255,6 +261,9 @@ pub(super) fn empty_trash(ctx: &mut Ctx) -> R<()> {
     for trash in &trashes {
         for sub in ["files", "info"] {
             let dir = trash.join(sub);
+            if !private_dir(&dir, ctx.trash.uid) {
+                continue;
+            }
             if let Ok(rd) = fs::read_dir(&dir) {
                 items.extend(rd.filter_map(Result::ok).map(|e| e.path()));
             }

@@ -591,6 +591,29 @@ fn empty_trash_clears_home_and_volume_trashes() {
 
 #[cfg(unix)]
 #[test]
+fn empty_trash_does_not_follow_links_in_a_volume_trash() {
+    let (linked_files, linked_trash) = (tempdir(), tempdir());
+    let r = rig_with(Some(vec![linked_files.path().to_path_buf(), linked_trash.path().to_path_buf()]));
+    let uid = uid_of(r._data.path());
+
+    let kept = linked_files.path().join("home/a.txt");
+    fs::create_dir_all(kept.parent().unwrap()).unwrap();
+    fs::write(&kept, "a").unwrap();
+    let trash = linked_files.path().join(format!(".Trash-{uid}"));
+    fs::create_dir(&trash).unwrap();
+    symlink(linked_files.path().join("home"), trash.join("files")).unwrap();
+
+    let elsewhere = linked_trash.path().join("elsewhere/files/b.txt");
+    fs::create_dir_all(elsewhere.parent().unwrap()).unwrap();
+    fs::write(&elsewhere, "b").unwrap();
+    symlink(linked_trash.path().join("elsewhere"), linked_trash.path().join(format!(".Trash-{uid}"))).unwrap();
+
+    r.run(Op::EmptyTrash).created();
+    assert_eq!((read(&kept).as_str(), read(&elsewhere).as_str()), ("a", "b"));
+}
+
+#[cfg(unix)]
+#[test]
 fn trash_on_a_volume_without_a_trash_dir_fails_honestly() {
     let Ok(vol) = tempfile::tempdir_in("/dev/shm") else { return };
     let r = rig_with(Some(vec![vol.path().to_path_buf()]));
